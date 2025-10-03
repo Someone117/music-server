@@ -13,12 +13,13 @@ var fileExtension string
 var spotify_query_limit string
 var disable_auth bool
 var enable_download bool
+var disable_auth_warnings bool
 
 // Init function to load .env file and setup database connection
 func init() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatal("Error loading .env file: ", err)
 	}
 	musicDir = os.Getenv("MUSIC_DIR")
 	fileExtension = os.Getenv("FILE_EXTENSION")
@@ -27,9 +28,9 @@ func init() {
 		spotify_query_limit = "50"
 	}
 	disable_auth = os.Getenv("DISABLE_AUTH") == "true"	
+	disable_auth_warnings = os.Getenv("DISABLE_AUTH_WARNINGS") == "true"
 
-	// Note: DO NOT set to true. Use your own music collection. Setting this to true will use spotdl to download music, read https://github.com/spotDL/spotify-downloader for a notice on the potential consequences of using this feature.
-	enable_download = os.Getenv("ENABLE_DOWNLOAD") == "true"
+	// Note: DO NOT set to true. Use your own music collection. Setting this to true will use yt-dlp to download music.
 	setupDB()
 }
 

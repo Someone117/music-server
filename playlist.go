@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -37,8 +38,9 @@ func createPlaylistHandler(c *gin.Context) {
 	}
 
 	// Create playlist in database
-	_, err = db.Exec("INSERT INTO playlists (id, title, username, tracks, flags) VALUES (?, ?, ?, ?, ?)", playlistName, playlistName, username, "-1", 0)
+	_, err = db.Exec("INSERT INTO playlists (id, title, username, tracks, flags) VALUES (?, ?, ?, ?, ?)", playlistName+"_"+username, playlistName, username, "", 0)
 	if err != nil {
+		fmt.Printf("Error creating playlist: %v\n", err)
 		c.JSON(500, gin.H{"Error": "Database error"})
 		return
 	}
@@ -75,28 +77,23 @@ func addTrackHandler(c *gin.Context) {
 	}
 
 	listofIds := strings.Split(trackIDs, ",")
+
+	// get the playlist object from the list
 	var playlist Playlist
-	err = db.QueryRow("SELECT * FROM playlists WHERE id = ?", playlistID).Scan(&playlist)
+	err = db.QueryRow("SELECT * FROM playlists WHERE id = ?", playlistID).Scan(&playlist.ID, &playlist.Title, &playlist.Username, &playlist.Tracks, &playlist.Flags)
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Database error"})
 		return
 	}
+
 	for _, trackID := range listofIds {
 		if trackID == "" {
 			continue
 		}
-		// Check if track exists in the database
-		var exists bool
-		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?)", trackID).Scan(&exists)
-		if err != nil {
-			c.JSON(500, gin.H{"Error": "Database error"})
-			return
+		// if the last character of the tracks is not a comma and not empty, add a comma
+		if playlist.Tracks != "" && playlist.Tracks[len(playlist.Tracks)-1] != ',' {
+			playlist.Tracks += ","
 		}
-		if !exists {
-			c.JSON(404, gin.H{"Error": "Track not found: " + trackID})
-			return
-		}
-		// get playlist obj
 		playlist.Tracks += trackID + ","
 
 	}
@@ -138,6 +135,7 @@ func setPlaylistTracksHandler(c *gin.Context) {
 
 	listofIds := strings.Split(trackIDs, ",")
 	var tracks string
+	// Then, make one request to check if all tracks exist
 	for _, trackID := range listofIds {
 		if trackID == "" {
 			continue

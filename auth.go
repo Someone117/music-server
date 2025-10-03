@@ -48,23 +48,25 @@ func validateSession(c *gin.Context) (string, error) {
 	// check if user exists
 	sessionID, err := c.Cookie("session_id")
 	if disable_auth {
-		fmt.Println("AUTHENTICATION DISABLED - USING TEST USER")
-		fmt.Println("PLEASE DO NOT USE IN PRODUCTION")
-		fmt.Println("THIS IS FOR TESTING PURPOSES ONLY")
-		fmt.Println("WARNING: DO NOT USE IN PRODUCTION")
+		if !disable_auth_warnings {
+			fmt.Println("AUTHENTICATION DISABLED - USING TEST USER")
+			fmt.Println("PLEASE DO NOT USE IN PRODUCTION")
+			fmt.Println("THIS IS FOR TESTING PURPOSES ONLY")
+			fmt.Println("WARNING: DO NOT USE IN PRODUCTION")
+		}
 		return "test", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("session ID not found")
 	}
 	username, ok := usernames[sessionID]
-	fmt.Println("sessionID:", sessionID)
-	fmt.Println("disable_auth:", disable_auth)
 	if username == "test" {
-		fmt.Println("TEST USER DETECTED DURING PRODUCTION")
-		fmt.Println("THIS SHOULD NOT HAPPEN")
-		fmt.Println("PLEASE USE A REAL USER")
-		fmt.Println("ALSO PLEASE SECURE THE SERVER BY DISABLING THE TEST USER")
+		if !disable_auth_warnings {
+			fmt.Println("TEST USER DETECTED DURING PRODUCTION")
+			fmt.Println("THIS SHOULD NOT HAPPEN")
+			fmt.Println("PLEASE USE A REAL USER")
+			fmt.Println("ALSO PLEASE SECURE THE SERVER BY DISABLING THE TEST USER")
+		}
 		return "", fmt.Errorf("invalid username or password")
 	}
 	if !ok {

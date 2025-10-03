@@ -51,6 +51,10 @@ func ApiSetUp() {
 		})
 	})
 
+	// redirect / to /home
+	router.GET("/", func(c *gin.Context) {
+		c.Redirect(302, "/home")
+	})
 	router.GET("/login", loginHandler)
 	router.GET("/callback", callbackHandler)
 
@@ -58,8 +62,9 @@ func ApiSetUp() {
 	router.GET("/search", searchHandler)
 	router.GET("/getArtistAlbums", artistAlbumsHandler)
 	router.GET("/getAlbumTracks", albumTracksHandler)
+	router.GET("/getArtistTracks", artistTracksHandler)
 
-	// get one from db
+	// get one or more from db
 	router.GET("/getTrack", trackHandler)
 	router.GET("/getAlbum", albumHandler)
 	router.GET("/getArtist", artistHandler)
@@ -67,6 +72,8 @@ func ApiSetUp() {
 	router.GET("/getArtistImage", artistImageHandler)
 	router.GET("/getAlbumArtist", albumArtistHandler)
 	router.GET("/getAlbumArtists", albumArtistsHandler)
+	router.GET("/getTracksInfo", getTracksInfo)
+	router.GET("/loadTracks", loadTracksHandler)
 
 	// get all from db
 	router.GET("/getPlaylists", playlistsHandler)
@@ -88,6 +95,9 @@ func ApiSetUp() {
 
 	router.GET("/home", homeHandler)
 	router.GET("/loginPage", loginPageHandler)
+
+	// automatically serve files in templates/static
+	router.Static("/static", "./templates/static")
 
 	// start the server
 	// gin.SetMode(gin.ReleaseMode)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 )
 
 func makeRequest(method string, url string, headers map[string]string, params map[string]string, body url.Values) (*http.Response, error) {
@@ -352,46 +353,75 @@ func albumArtistsHandler(c *gin.Context) {
 
 	albumIDs := c.Query("ids")
 	albumIDList := strings.Split(albumIDs, ",")
-	albumArtistNames := []string{}
-	albumArtistIDs := []string{}
-	for _, albumID := range albumIDList {
-		albumArtists := []Album_Artist{}
-		err = db.Select(&albumArtists, "SELECT DISTINCT artist_id FROM album_artists WHERE album_id = ?", albumID)
-		if err != nil {
-			fmt.Printf("Error: %v", err)
-			c.JSON(500, gin.H{"Error": "Internal server error"})
-			return
-		}
-		// make album artist names and ids into a list
-		var artistIDsBuilder strings.Builder
-		for i, albumArtist := range albumArtists {
-			if i > 0 {
-				artistIDsBuilder.WriteString(",")
-			}
-			artistIDsBuilder.WriteString(albumArtist.Artist_ID)
-		}
-		albumArtistIDs = append(albumArtistIDs, artistIDsBuilder.String())
 
-		// get artist names from db
-		artists := []Artist{}
-		for _, albumArtist := range albumArtists {
-			err = db.Select(&artists, "SELECT * FROM artists WHERE id = ?", albumArtist.Artist_ID)
-			if err != nil {
-				fmt.Printf("Error: %v", err)
-				c.JSON(500, gin.H{"Error": "Internal server error"})
-				return
-			}
-		}
-		// use a strings.Builder for efficient string concatenation
-		var artistNamesBuilder strings.Builder
-		for i, artist := range artists {
-			if i > 0 {
-				artistNamesBuilder.WriteString(",")
-			}
-			artistNamesBuilder.WriteString(artist.Name)
-		}
-		albumArtistNames = append(albumArtistNames, artistNamesBuilder.String())
+	if len(albumIDList) == 0 {
+		c.JSON(400, gin.H{"Error": "No album IDs provided"})
+		return
 	}
+
+	query, args, err := sqlx.In("SELECT album_id, artist_id FROM album_artists WHERE album_id IN (?)", albumIDList)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+	query = db.Rebind(query)
+
+	var albumArtists []Album_Artist
+	if err := db.Select(&albumArtists, query, args...); err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	artistIDSet := make(map[string]struct{})
+	for _, aa := range albumArtists {
+		artistIDSet[aa.Artist_ID] = struct{}{}
+	}
+
+	artistIDs := make([]string, 0, len(artistIDSet))
+	for id := range artistIDSet {
+		artistIDs = append(artistIDs, id)
+	}
+
+	query, args, err = sqlx.In("SELECT id, name FROM artists WHERE id IN (?)", artistIDs)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+	query = db.Rebind(query)
+
+	var artists []Artist
+	if err := db.Select(&artists, query, args...); err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	// Map artistID -> artistName
+	artistMap := make(map[string]string, len(artists))
+	for _, artist := range artists {
+		artistMap[artist.ID] = artist.Name
+	}
+
+	albumArtistIDs := make([]string, 0, len(albumIDList))
+	albumArtistNames := make([]string, 0, len(albumIDList))
+
+	for _, albumID := range albumIDList {
+		var idsBuilder, namesBuilder strings.Builder
+		first := true
+		for _, aa := range albumArtists {
+			if aa.Album_ID == albumID {
+				if !first {
+					idsBuilder.WriteString(",")
+					namesBuilder.WriteString(",")
+				}
+				idsBuilder.WriteString(aa.Artist_ID)
+				namesBuilder.WriteString(artistMap[aa.Artist_ID])
+				first = false
+			}
+		}
+		albumArtistIDs = append(albumArtistIDs, idsBuilder.String())
+		albumArtistNames = append(albumArtistNames, namesBuilder.String())
+	}
+
 	c.JSON(200, gin.H{
 		"artistIDs":    albumArtistIDs,
 		"artistsNames": albumArtistNames,
@@ -418,10 +448,7 @@ func trackHandler(c *gin.Context) {
 		return
 	}
 	if c.Query("download") == "true" {
-		downloadQueueMutex.Lock()
-		downloadQueue = append(downloadQueue, track.ID)
-		downloadQueueMutex.Unlock()
-		go downloadTracks()
+		queueDownloads([]string{track.ID}, true)
 	}
 	c.JSON(200, gin.H{
 		"track": track,
@@ -474,6 +501,7 @@ func albumArtistHandler(c *gin.Context) {
 		artistIDs = append(artistIDs, albumArtist.Artist_ID)
 	}
 	// get artist names from db
+	// TODO: make this one query
 	artists := []Artist{}
 	for _, artistID := range artistIDs {
 		err = db.Select(&artists, "SELECT * FROM artists WHERE id = ?", artistID)
@@ -574,6 +602,7 @@ func artistAlbumsHandler(c *gin.Context) {
 	}
 
 	// see if the timestamp is older than a day
+	// TDDO: make this faster
 	if artist.LastUpdated < (time.Now().Unix() - 86400) {
 		// search spotify to update
 		userToken, err := getValidToken(username)
@@ -581,7 +610,7 @@ func artistAlbumsHandler(c *gin.Context) {
 			c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
 			return
 		}
-		albums, err = getSpoifyAlbumsForArtist(userToken, artistID)
+		albums, err = getSpotifyAlbumsForArtist(userToken, artistID)
 		if err != nil {
 			c.JSON(500, gin.H{"Error": "Internal server error"})
 			return
@@ -672,7 +701,7 @@ func albumTracksHandler(c *gin.Context) {
 	})
 }
 
-func getSpoifyAlbumsForArtist(userToken string, artistID string) ([]Album, error) {
+func getSpotifyAlbumsForArtist(userToken string, artistID string) ([]Album, error) {
 	// search spotify
 	index := 0
 	limit, err := strconv.Atoi(spotify_query_limit)
@@ -824,7 +853,6 @@ func artistImageHandler(c *gin.Context) {
 				c.JSON(500, gin.H{"Error": "Internal server error"})
 				return
 			}
-			fmt.Println("Spotify response: ", spotifyResponse)
 			images, ok := spotifyResponse["images"].([]any)
 			if ok && len(images) > 0 {
 				imageMap, ok := images[0].(map[string]any)
@@ -901,4 +929,186 @@ func parseReleaseDate(release_date string, release_date_precision string) (int, 
 	default:
 		return 0, fmt.Errorf("unsupported precision: %s", release_date_precision)
 	}
+}
+
+func getTracksInfo(c *gin.Context) {
+	_, err := validateSession(c)
+	if err != nil {
+		c.JSON(401, gin.H{"Error": err.Error()})
+		return
+	}
+	tracks := c.Query("ids")
+	trackIDs := strings.Split(tracks, ",")
+	
+	
+	tracksList := []Track{}
+	query, args, err := sqlx.In("SELECT * FROM tracks WHERE id IN (?)", trackIDs)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	query = db.Rebind(query)
+	err = db.Select(&tracksList, query, args...)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	albumIDs := make([]string, 0, len(tracksList))
+	for _, t := range tracksList {
+		albumIDs = append(albumIDs, t.Album)
+	}
+
+	albumArtists := []Album_Artist{}
+	query, args, err = sqlx.In("SELECT DISTINCT album_id, artist_id FROM album_artists WHERE album_id IN (?)", albumIDs)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+	query = db.Rebind(query)
+	err = db.Select(&albumArtists, query, args...)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	artistIDSet := map[string]struct{}{}
+	for _, aa := range albumArtists {
+		artistIDSet[aa.Artist_ID] = struct{}{}
+	}
+	artistIDs := make([]string, 0, len(artistIDSet))
+	for id := range artistIDSet {
+		artistIDs = append(artistIDs, id)
+	}
+
+	artists := []Artist{}
+	query, args, err = sqlx.In("SELECT * FROM artists WHERE id IN (?)", artistIDs)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+	query = db.Rebind(query)
+	err = db.Select(&artists, query, args...)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	artistMap := map[string]string{}
+	for _, a := range artists {
+		artistMap[a.ID] = a.Name
+	}
+
+	albumArtistIDs := []string{}
+	albumArtistNames := []string{}
+	for _, t := range tracksList {
+		ids := []string{}
+		names := []string{}
+		for _, aa := range albumArtists {
+			if aa.Album_ID == t.Album {
+				ids = append(ids, aa.Artist_ID)
+				if name, ok := artistMap[aa.Artist_ID]; ok {
+					names = append(names, name)
+				}
+			}
+		}
+		albumArtistIDs = append(albumArtistIDs, strings.Join(ids, ","))
+		albumArtistNames = append(albumArtistNames, strings.Join(names, ", "))
+	}
+
+	c.JSON(200, gin.H{
+		"tracks":       tracksList,
+		"artistIDs":    albumArtistIDs,
+		"artistsNames": albumArtistNames,
+	})
+}
+
+func artistTracksHandler(c *gin.Context) {
+	username, err := validateSession(c)
+	if err != nil {
+		c.JSON(401, gin.H{"Error": err.Error()})
+		return
+	}
+
+	artistID := c.Query("id")
+
+	tracks := []Track{}
+	// get Artist from db
+	artist := Artist{}
+	err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", artistID)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	// see if the timestamp is older than a day
+	if artist.LastUpdated < (time.Now().Unix() - 86400) {
+		// search spotify to update
+		userToken, err := getValidToken(username)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
+			return
+		}
+		var albums []Album
+		albums, err = getSpotifyAlbumsForArtist(userToken, artistID)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Internal server error"})
+			return
+		}
+		// for all the new albums get the tracks
+		all_tracks := []Track{}
+		for _, album := range albums {
+			album_tracks, err := getSpotifyTracksForAlbum(userToken, album.ID)
+			if err != nil {
+				c.JSON(500, gin.H{"Error": "Internal server error"})
+				return
+			}
+			all_tracks = append(all_tracks, album_tracks...)
+		}
+		// return tracks
+		c.JSON(200, gin.H{
+			"tracks":           all_tracks,
+			"number_of_tracks": len(all_tracks),
+		})
+		return
+	}
+	// else get tracks from db
+	album_artists := []Album_Artist{}
+	err = db.Select(&album_artists, "SELECT * FROM album_artists WHERE artist_id = ?", artistID)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	albumIDs := make([]string, 0, len(album_artists))
+	for _, aa := range album_artists {
+		albumIDs = append(albumIDs, aa.Album_ID)
+	}
+
+	if len(albumIDs) == 0 {
+		c.JSON(200, gin.H{
+			"tracks":           tracks,
+			"number_of_tracks": len(tracks),
+		})
+		return
+	}
+
+	query, args, err := sqlx.In("SELECT * FROM tracks WHERE album IN (?)", albumIDs)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+	query = db.Rebind(query)
+
+	err = db.Select(&tracks, query, args...)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"tracks":           tracks,
+		"number_of_tracks": len(tracks),
+	})
 }

@@ -76,6 +76,15 @@ func setupDB() {
 		log.Fatalf("Error connecting to DB: %v", err)
 	}
 
+	db.MustExec(`
+        PRAGMA cache_size = -64000;      -- ~64MB
+        PRAGMA temp_store = MEMORY;
+        PRAGMA mmap_size = 5000000000;  -- 5GB if OS allows
+        PRAGMA optimize;
+    `)
+
+	log.Println("SQLite PRAGMAs applied!")
+
 	// get usernames from db and make user objects and also add to oauthConfigs
 	var dbUsers []User
 	err = db.Select(&dbUsers, "SELECT * FROM users")

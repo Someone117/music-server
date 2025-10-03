@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -12,9 +14,6 @@ import (
 
 var hostPasswords = make(map[string]string) // host password (if set)
 var clientsMutex sync.Mutex
-
-var downloadQueue []string // queue of tracks to download
-var downloadQueueMutex sync.Mutex
 
 // Parameters: username, password, hostPw
 // Returns: response code 200 if successful
@@ -57,10 +56,7 @@ func playerHandler(c *gin.Context) {
 			return
 		}
 		if track.IsDownloaded == 0 {
-			downloadQueueMutex.Lock()
-			downloadQueue = append(downloadQueue, track.ID)
-			downloadQueueMutex.Unlock()
-			downloadTracks()
+			downloadTracks([]string{track.ID})
 		}
 		// try again
 		err = db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
@@ -69,10 +65,23 @@ func playerHandler(c *gin.Context) {
 			return
 		}
 		if track.IsDownloaded == 0 {
-			downloadQueueMutex.Lock()
-			downloadQueue = append(downloadQueue, track.ID)
-			downloadQueueMutex.Unlock()
-			downloadTracks()
+			// if the file exists, set it as downloaded
+			trackPath := generatePath(track.ID)
+			if _, err := os.Stat(trackPath); err == nil {
+				err = SetTrackDownloaded(track.ID, 1)
+				if err != nil {
+					log.Println("Error setting track as downloaded: ", err.Error())
+				}
+			} else if !os.IsNotExist(err) {
+				// Some other error occurred while checking the file
+				log.Println("Error checking file: ", err.Error())
+			}
+			// if still not downloaded, add to queue
+			if track.IsDownloaded == 0 {
+				c.JSON(500, gin.H{"Error": "Track not downloaded yet, try again later"})
+				return
+			}
+
 		}
 	}
 
@@ -89,18 +98,16 @@ func playerHandler(c *gin.Context) {
 		return
 	}
 
-	c.Writer.WriteHeader(http.StatusOK)
 	c.File(generatePath(track.ID))
 }
 
 // downloads track
-func downloadTracks() {
-	downloadQueueMutex.Lock()
-	data := downloadQueue
-	downloadQueue = []string{}
-	downloadQueueMutex.Unlock()
+func downloadTracks(data []string) {
 
-	var urls string
+	if len(data) == 0 {
+		return
+	}
+
 	for _, trackID := range data {
 		trackPath := generatePath(trackID)
 		if _, err := os.Stat(trackPath); err == nil {
@@ -110,16 +117,37 @@ func downloadTracks() {
 			log.Println("Error checking file: ", err.Error())
 			continue
 		}
-		urls += "https://open.spotify.com/track/" + trackID + " "
-	}
+		track := Track{}
+		err := db.Get(&track, "SELECT * FROM tracks WHERE id = ?", trackID)
+		if err != nil {
+			log.Println("Error getting track from DB: ", err.Error())
+			continue
+		}
+		// get artist
+		album := Album{}
+		err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", track.Album)
+		if err != nil {
+			log.Println("Error getting artist from DB: ", err.Error())
+			continue
+		}
 
-	// Download the track using spotdl
-	cmd := exec.Command(musicDir+"/spotdl", "--format", fileExtension, "--output", "{track-id}", "download", urls)
-	cmd.Dir = musicDir
-	err := cmd.Run()
-	// log error
-	if err != nil {
-		log.Println("Error downloading track: ", err.Error())
+		query := fmt.Sprintf("ytsearch1:%s %s %s", track.Title, album.Title, "song")
+		outputFile := generatePath(track.ID)
+
+		// yt-dlp command
+		cmd := exec.Command(musicDir+"/yt-dlp",
+			query,
+			"-x", "--audio-format", "mp3",
+			"-o", outputFile,
+		)
+
+		fmt.Printf("Downloading: %s -> %s.mp3\n", track.Title, track.ID)
+		err = cmd.Run()
+		if err != nil {
+			log.Printf("Error downloading track %s: %s\n", track.Title, err.Error())
+		} else {
+			fmt.Printf("Downloaded: %s\n", track.Title)
+		}
 	}
 
 	// Check if the tracks are downloaded
@@ -131,11 +159,9 @@ func downloadTracks() {
 			if err != nil {
 				log.Println("Error setting track as downloaded: ", err.Error())
 			}
-		} else {
-			// you need to redownload the track
-			downloadQueueMutex.Lock()
-			downloadQueue = append(downloadQueue, trackID)
-			downloadQueueMutex.Unlock()
+			downloadOnceMutex.Lock()
+			delete(downloadingMap, trackID)
+			downloadOnceMutex.Unlock()
 		}
 	}
 }
@@ -208,4 +234,49 @@ func getCurrentlyPlayingHandler(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusForbidden, gin.H{"Error": "Forbidden"})
+}
+
+func loadTracksHandler(c *gin.Context) {
+	_, err := validateSession(c)
+	if err != nil {
+		c.JSON(401, gin.H{"Error": err.Error()})
+		return
+	}
+
+	ids := c.Query("id")
+	split := strings.Split(ids, ",")
+	if len(split) == 0 {
+		c.JSON(400, gin.H{"Error": "No track IDs provided"})
+		return
+	}
+
+	queueDownloads(split, true)
+	c.JSON(200, gin.H{"Message": "Tracks are being loaded"})
+}
+
+var downloadOnceMutex sync.Mutex
+var downloadingMap = make(map[string]bool)
+
+func queueDownloads(downloadIDs []string, downloadAsync bool) {
+	toDownload := []string{}
+
+	downloadOnceMutex.Lock()
+	for _, id := range downloadIDs {
+		if downloadingMap[id] {
+			// already downloading
+			continue
+		}
+		downloadingMap[id] = true
+		toDownload = append(toDownload, id)
+	}
+	downloadOnceMutex.Unlock()
+	if len(toDownload) == 0 {
+		return
+	}
+
+	if !downloadAsync {
+		downloadTracks(toDownload)
+	} else {
+		go downloadTracks(toDownload)
+	}
 }

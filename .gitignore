@@ -1,7 +1,6 @@
 .env
 music.db
 music
-logs
 templates
 music-server
-documentation.txt
+music.db*
