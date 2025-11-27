@@ -66,10 +66,10 @@ func ApiSetUp() {
 
 	// redirect / to /home
 	router.GET("/", func(c *gin.Context) {
-		c.File("./static/home.html")
+		c.File("./static/music-client/home.html")
 	})
 	router.GET("/loginPage", func(c *gin.Context) {
-		c.File("./static/login.html")
+		c.File("./static/music-client/login.html")
 	})
 	router.GET("/login", loginHandler)
 	router.GET("/callback", callbackHandler)
@@ -110,8 +110,8 @@ func ApiSetUp() {
 		ctx.File("./static/favicon.ico")
 	})
 
-	// automatically serve files in templates/static
-	router.Static("/static", "./static")
+	// automatically serve files in static
+	router.Static("/static", "./static/music-client")
 
 	// start the server
 	// gin.SetMode(gin.ReleaseMode)

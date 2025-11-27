@@ -7,4 +7,4 @@ music/resetdownloads.sqbpro
 music-server
 music.db*
 cert/*
-static/
+static/*
