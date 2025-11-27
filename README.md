@@ -13,6 +13,9 @@ yt-dlp (named that way) in /music/
 To Run:
 create a venv named .venv in /music/ and install ytmusicapi and fuzzywuzzy in it
 
+add my music-client files to /static/music-client/ 
+(run git clone https://github.com/Someone117/music-client in /static/)
+
 run.sh (optionally with --release) (will create db, but error out without a user)
 
 To add a user with Spotify credentials:
