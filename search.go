@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -54,7 +55,7 @@ func generatePath(id string) string {
 // Returns: albums, artists, tracks, playlists spotify_albums, spotify_artists, spotify_tracks
 // searches for albums, artists, tracks, and playlists in the database and spotify
 func searchHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -73,7 +74,6 @@ func searchHandler(c *gin.Context) {
 	searchTracks := c.Query("tracks") == "true"
 	searchPlaylists := c.Query("playlists") == "true"
 	searchSpotify := c.Query("spotify") == "true"
-	searchDB := c.Query("db") != "false"
 
 	if !searchAlbums && !searchArtists && !searchTracks && !searchPlaylists {
 		c.JSON(400, gin.H{"Error": "No search type provided"})
@@ -85,37 +85,77 @@ func searchHandler(c *gin.Context) {
 	var tracks []Track
 	var playlists []Playlist
 
-	if searchDB {
-		if searchAlbums {
-			// get albums from db
-			err := db.Select(&albums, "SELECT * FROM albums WHERE name LIKE ?", "%"+query+"%")
-			if err != nil {
-				fmt.Printf("Error getting albums %v", err)
+	if searchAlbums {
+		// get albums from db
+		var temp_albums []Album
+		err := db.Select(&temp_albums, "SELECT * FROM albums WHERE title LIKE ?", "%"+query+"%")
+		if err != nil {
+			fmt.Printf("Error getting albums %v", err)
+		}
+		for _, album := range temp_albums {
+			if strings.EqualFold(album.Title, query) {
+				// album found
+				albums = append([]Album{album}, albums...)
 			}
 		}
-		if searchArtists {
-			// get artists from db
-			err := db.Select(&artists, "SELECT * FROM artists WHERE name LIKE ?", "%"+query+"%")
-			if err != nil {
-				// do nothing cuz we need to search spotify
-				fmt.Printf("Error getting artists %v", err)
+	}
+	if searchArtists {
+		// get artists from db
+		var temp_artists []Artist
+		err := db.Select(&temp_artists, "SELECT * FROM artists WHERE name LIKE ?", "%"+query+"%")
+		if err != nil {
+			// do nothing cuz we need to search spotify
+			fmt.Printf("Error getting artists %v", err)
+		}
+		for _, artist := range temp_artists {
+			if strings.EqualFold(artist.Name, query) {
+				// artist found
+				artists = append([]Artist{artist}, artists...)
 			}
 		}
-		if searchTracks {
-			// get tracks from db
-			err := db.Select(&tracks, "SELECT * FROM tracks WHERE title LIKE ?", "%"+query+"%")
-			if err != nil {
-				fmt.Printf("Error getting tracks %v", err)
-				// do nothing cuz we need to search spotify
+	}
+	if searchTracks {
+		// get tracks from db
+		var temp_tracks []Track
+		err := db.Select(&temp_tracks, "SELECT * FROM tracks WHERE title LIKE ?", "%"+query+"%")
+		if err != nil {
+			fmt.Printf("Error getting tracks %v", err)
+			// do nothing cuz we need to search spotify
+		}
+		for _, track := range temp_tracks {
+			if strings.EqualFold(track.Title, query) {
+				// track found
+				tracks = append([]Track{track}, tracks...)
 			}
 		}
-		if searchPlaylists {
-			// get playlists from db
-			err := db.Select(&playlists, "SELECT * FROM playlists WHERE title LIKE ?", "%"+query+"%")
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Error getting playlists" + err.Error()})
-				return
+	}
+	if searchPlaylists {
+		// get playlists from db
+		var temp_playlists []Playlist
+		err := db.Select(&temp_playlists, "SELECT * FROM playlists WHERE title LIKE ? AND username = ?", "%"+query+"%", username)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting playlists" + err.Error()})
+			return
+		}
+		for _, playlist := range temp_playlists {
+			if strings.EqualFold(playlist.Title, query) {
+				// playlist found
+				playlists = append([]Playlist{playlist}, playlists...)
 			}
+		}
+	}
+
+	if searchSpotify && (!searchAlbums && !searchArtists && !searchTracks) {
+		searchSpotify = false
+	} else if searchSpotify {
+		if searchAlbums && len(albums) >= max_db_to_fetch {
+			searchAlbums = false
+		}
+		if searchArtists && len(artists) >= max_db_to_fetch {
+			searchArtists = false
+		}
+		if searchTracks && len(tracks) >= max_db_to_fetch {
+			searchTracks = false
 		}
 	}
 
@@ -167,143 +207,105 @@ func searchHandler(c *gin.Context) {
 			return
 		}
 
-		// albums
-		if searchAlbums {
-			for _, album := range spotifyResponse["albums"].(map[string]any)["items"].([]any) {
-				image := album.(map[string]any)["images"].([]any)[0].(map[string]any)["url"].(string)
-				smallimage := album.(map[string]any)["images"].([]any)[len(album.(map[string]any)["images"].([]any))-1].(map[string]any)["url"].(string)
+		new_mini_artists := []string{}
 
-				release_date := album.(map[string]any)["release_date"].(string)
-				release_date_precision := album.(map[string]any)["release_date_precision"].(string)
-				release_date_int, _ := parseReleaseDate(release_date, release_date_precision)
-
-				new_album := Album{
-					ID:          album.(map[string]any)["id"].(string),
-					Title:       album.(map[string]any)["name"].(string),
-					Image:       image,
-					SmallImage:  smallimage,
-					IsFull:      0,
-					ReleaseDate: release_date_int,
+		// tracks
+		if searchTracks {
+			items := spotifyResponse["tracks"].(map[string]any)["items"].([]interface{})
+			for _, item := range items {
+				itemMap := item.(map[string]any)
+				if itemMap == nil {
+					continue
+				} else if itemMap["id"] == nil {
+					continue
 				}
-				err = AddAlbum(new_album)
+				for _, dbTrack := range tracks {
+					if dbTrack.ID == itemMap["id"].(string) {
+						// track found in db, skip
+						continue
+					}
+				}
+				new_track, new_album, artistIDs, err := trackDataHandler(itemMap, userToken)
 				if err != nil {
-					c.JSON(500, gin.H{"Error": "Error adding artist" + err.Error()})
+					c.JSON(500, gin.H{"Error": "Error getting track data" + err.Error()})
 					return
 				}
-				// add albums to search results
+				AddTrack(new_track)
+				AddAlbum(new_album)
+				new_mini_artists = append(new_mini_artists, artistIDs...)
+				spotify_tracks = append(spotify_tracks, new_track)
 				spotify_albums = append(spotify_albums, new_album)
+			}
+		}
 
-				// get artists for album
-				for _, artist := range album.(map[string]any)["artists"].([]any) {
-					new_artist := Artist{ID: artist.(map[string]any)["id"].(string), Name: artist.(map[string]any)["name"].(string), Image: ""}
-					err = AddArtist(new_artist)
-					if err != nil {
-						c.JSON(500, gin.H{"Error": "Error adding artist" + err.Error()})
-						return
-					}
-					err = AddAlbumArtist(Album_Artist{Artist_ID: new_artist.ID, Album_ID: new_album.ID})
-					if err != nil {
-						c.JSON(500, gin.H{"Error": "Error adding album_artist" + err.Error()})
-						return
+		// albums
+		if searchAlbums {
+			items := spotifyResponse["albums"].(map[string]any)["items"].([]interface{})
+			for _, item := range items {
+				itemMap := item.(map[string]any)
+				if itemMap == nil {
+					continue
+				} else if itemMap["id"] == nil {
+					continue
+				}
+				for _, dbAlbum := range albums {
+					if dbAlbum.ID == itemMap["id"].(string) {
+						// album found in db, skip
+						continue
 					}
 				}
+				// only proceed if album name matches query
+				if itemMap["name"] != nil || !strings.Contains(strings.ToLower(itemMap["name"].(string)), strings.ToLower(query)) {
+					continue
+				}
+				new_album, artistIDs, err := albumDataHandler(itemMap, userToken)
+				if err != nil {
+					c.JSON(500, gin.H{"Error": "Error getting album data" + err.Error()})
+					return
+				}
+				AddAlbum(new_album)
+				new_mini_artists = append(new_mini_artists, artistIDs...)
+				spotify_albums = append(spotify_albums, new_album)
 			}
 		}
 
 		// artists
 		if searchArtists {
-			for _, artist := range spotifyResponse["artists"].(map[string]any)["items"].([]any) {
-				images := artist.(map[string]any)["images"].([]any)
-				var imageURL string
-				if len(images) > 0 {
-					imageURL = images[0].(map[string]any)["url"].(string)
-				} else {
-					imageURL = "" // or a placeholder URL
+			items := spotifyResponse["artists"].(map[string]any)["items"].([]interface{})
+			for _, item := range items {
+				itemMap := item.(map[string]any)
+				if itemMap == nil {
+					continue
+				} else if itemMap["id"] == nil {
+					continue
 				}
-
-				new_artist := Artist{
-					ID:    artist.(map[string]any)["id"].(string),
-					Name:  artist.(map[string]any)["name"].(string),
-					Image: imageURL,
+				// only proceed if artist name matches query
+				for _, dbArtist := range artists {
+					if dbArtist.ID == itemMap["id"].(string) {
+						// artist found in db, skip
+						continue
+					}
 				}
-				err = AddArtist(new_artist)
+				new_artist, err := artistDataHandler(itemMap)
 				if err != nil {
-					c.JSON(500, gin.H{"Error": "Error adding artist" + err.Error()})
+					c.JSON(500, gin.H{"Error": "Error getting artist data" + err.Error()})
 					return
 				}
-				// add artists to search results
-				spotify_artists = append(spotify_artists, new_artist)
+				AddArtist(new_artist)
+
 			}
 		}
 
-		// tracks
-		if searchTracks {
-			for _, track := range spotifyResponse["tracks"].(map[string]any)["items"].([]any) {
-				trackMap := track.(map[string]any)
-
-				var albumID string
-				if albumRaw, ok := trackMap["album"].(map[string]any); ok {
-					if id, ok := albumRaw["id"].(string); ok {
-						albumID = id
-					}
-				}
-
-				// get album for track
-				album_response := track.(map[string]any)["album"].(map[string]any)
-				image := album_response["images"].([]any)[0].(map[string]any)["url"].(string)
-				smallimage := album_response["images"].([]any)[len(album_response["images"].([]any))-1].(map[string]any)["url"].(string)
-
-				new_track := Track{
-					ID:           trackMap["id"].(string),
-					Title:        trackMap["name"].(string),
-					Album:        albumID,
-					IsDownloaded: 0,
-					Image:        image,
-					SmallImage:   smallimage,
-				} // if the track already exists, don't add it to the search results
-				err = AddTrack(new_track)
-				if err != nil {
-					c.JSON(500, gin.H{"Error": "Error adding track" + err.Error()})
-					return
-				}
-				// add tracks to search results
-				spotify_tracks = append(spotify_tracks, new_track)
-
-				// get artists for track
-				for _, artist := range track.(map[string]any)["artists"].([]any) {
-					// add album
-					release_date := album_response["release_date"].(string)
-					release_date_precision := album_response["release_date_precision"].(string)
-					release_date_int, _ := parseReleaseDate(release_date, release_date_precision)
-
-					new_album := Album{
-						ID:          album_response["id"].(string),
-						Title:       album_response["name"].(string),
-						Image:       album_response["images"].([]any)[0].(map[string]any)["url"].(string),
-						SmallImage:  album_response["images"].([]any)[len(album_response["images"].([]any))-1].(map[string]any)["url"].(string),
-						IsFull:      0,
-						ReleaseDate: release_date_int,
-					}
-					err = AddAlbum(new_album)
-					if err != nil {
-						c.JSON(500, gin.H{"Error": "Error adding album" + err.Error()})
-						return
-					}
-					new_artist := Artist{ID: artist.(map[string]any)["id"].(string), Name: artist.(map[string]any)["name"].(string), Image: ""}
-					err = AddArtist(new_artist)
-					if err != nil {
-						c.JSON(500, gin.H{"Error": "Error adding artist" + err.Error()})
-						return
-					}
-					err = AddAlbumArtist(Album_Artist{Artist_ID: new_artist.ID, Album_ID: album_response["id"].(string)})
-					if err != nil {
-						c.JSON(500, gin.H{"Error": "Error adding album_artist" + err.Error()})
-						return
-					}
-				}
-
-			}
+		// mini_artists
+		mini_artists, err := miniArtistDataHandler(new_mini_artists, userToken)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting mini artist data" + err.Error()})
+			return
 		}
+		for _, artist := range mini_artists {
+			AddArtist(artist)
+		}
+		spotify_artists = append(spotify_artists, mini_artists...)
 
 	}
 
@@ -318,244 +320,292 @@ func searchHandler(c *gin.Context) {
 	})
 }
 
-// Parameters: username, password
-// Returns: playlists
-// gets playlists from db for the users account
-func playlistsHandler(c *gin.Context) {
-	username, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
+func trackDataHandler(track map[string]any, userToken string) (Track, Album, []string, error) {
+	// given a track, get the data, and get the album as a string and the artists as a list of strings
+	var trackData Track
+	// get artists for track
+	artistsNames := []string{}
+	artistsIDs := []string{}
+	album := track["album"]
+	artists := track["artists"]
+	for _, artist := range artists.([]any) {
+		artistMap := artist.(map[string]any)
+		artistsNames = append(artistsNames, artistMap["name"].(string))
+		artistsIDs = append(artistsIDs, artistMap["id"].(string))
 	}
-
-	playlists := []Playlist{}
-
-	err = db.Select(&playlists, "SELECT * FROM playlists WHERE username = ?", username)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Error getting playlists" + err.Error()})
-		return
+	trackData = Track{
+		ID:           track["id"].(string),
+		Title:        track["name"].(string),
+		AlbumID:      track["album"].(map[string]any)["id"].(string),
+		AlbumName:    track["album"].(map[string]any)["name"].(string),
+		ArtistsIDs:   artistsIDs,
+		ArtistsNames: artistsNames,
+		IsDownloaded: 0,
+		Image:        track["album"].(map[string]any)["images"].([]any)[0].(map[string]any)["url"].(string),
+		SmallImage:   track["album"].(map[string]any)["images"].([]any)[len(track["album"].(map[string]any)["images"].([]any))-1].(map[string]any)["url"].(string),
 	}
-	c.JSON(200, gin.H{
-		"playlists": playlists,
-	})
+	newAlbum, newIDs, err := albumDataHandler(album.(map[string]any), userToken)
+	if err != nil {
+		return trackData, Album{}, nil, err
+	}
+	artistsIDs = append(artistsIDs, newIDs...)
+	return trackData, newAlbum, artistsIDs, nil
 }
 
-// Parameters: username, password, ids
-// Returns: list of strings of artist names (comma separated) and a list of strings of artist ids
-// gets album artists from db by album id
-func albumArtistsHandler(c *gin.Context) {
-
-	_, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
+func miniArtistDataHandler(artistIDs []string, userToken string) ([]Artist, error) {
+	// bulk-select existing artists by IDs, return them and identify missing IDs for further lookup
+	if len(artistIDs) == 0 {
+		return []Artist{}, nil
 	}
 
-	albumIDs := c.Query("ids")
-	albumIDList := strings.Split(albumIDs, ",")
+	var existingArtists []Artist
+	var newArtists []Artist
 
-	if len(albumIDList) == 0 {
-		c.JSON(400, gin.H{"Error": "No album IDs provided"})
-		return
-	}
-
-	query, args, err := sqlx.In("SELECT album_id, artist_id FROM album_artists WHERE album_id IN (?)", albumIDList)
+	query, args, err := sqlx.In("SELECT * FROM artists WHERE id IN (?)", artistIDs)
 	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
+		return nil, err
 	}
 	query = db.Rebind(query)
 
-	var albumArtists []Album_Artist
-	if err := db.Select(&albumArtists, query, args...); err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
+	err = db.Select(&existingArtists, query, args...)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
 	}
 
-	artistIDSet := make(map[string]struct{})
-	for _, aa := range albumArtists {
-		artistIDSet[aa.Artist_ID] = struct{}{}
+	// build a map of existing IDs to detect missing ones
+	existingMap := make(map[string]struct{}, len(existingArtists))
+	for _, a := range existingArtists {
+		existingMap[a.ID] = struct{}{}
 	}
 
-	artistIDs := make([]string, 0, len(artistIDSet))
-	for id := range artistIDSet {
-		artistIDs = append(artistIDs, id)
-	}
-
-	query, args, err = sqlx.In("SELECT id, name FROM artists WHERE id IN (?)", artistIDs)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	query = db.Rebind(query)
-
-	var artists []Artist
-	if err := db.Select(&artists, query, args...); err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	// Map artistID -> artistName
-	artistMap := make(map[string]string, len(artists))
-	for _, artist := range artists {
-		artistMap[artist.ID] = artist.Name
-	}
-
-	albumArtistIDs := make([]string, 0, len(albumIDList))
-	albumArtistNames := make([]string, 0, len(albumIDList))
-
-	for _, albumID := range albumIDList {
-		var idsBuilder, namesBuilder strings.Builder
-		first := true
-		for _, aa := range albumArtists {
-			if aa.Album_ID == albumID {
-				if !first {
-					idsBuilder.WriteString(",")
-					namesBuilder.WriteString(",")
-				}
-				idsBuilder.WriteString(aa.Artist_ID)
-				namesBuilder.WriteString(artistMap[aa.Artist_ID])
-				first = false
-			}
+	var missingArtistIDs []string
+	seen := make(map[string]struct{}, len(artistIDs))
+	for _, id := range artistIDs {
+		if _, ok := existingMap[id]; ok {
+			continue
 		}
-		albumArtistIDs = append(albumArtistIDs, idsBuilder.String())
-		albumArtistNames = append(albumArtistNames, namesBuilder.String())
+		if _, s := seen[id]; s {
+			continue
+		}
+		seen[id] = struct{}{}
+		missingArtistIDs = append(missingArtistIDs, id)
 	}
 
-	c.JSON(200, gin.H{
-		"artistIDs":    albumArtistIDs,
-		"artistsNames": albumArtistNames,
-	})
+	if len(missingArtistIDs) > 0 {
+		newArtists, err = searchSpotifyForArtists(missingArtistIDs, userToken)
+		if err != nil {
+			return nil, err
+		}
+	}
 
+	return newArtists, nil
 }
 
-// Parameters: username, password, id, download (bool, optinal)
-// Returns: track
-// gets track from db by track id, downloads track if download is true
+func searchSpotifyForArtists(artistIDs []string, userToken string) ([]Artist, error) {
+	var newArtists []Artist
+	// TODO: bulk get artists from Spotify for missingArtistIDs and insert into DB, then append to existingArtists
+	// leaving this as a TODO to preserve existing behavior while fixing compilation/runtime errors
+	url := "https://api.spotify.com/v1/artists"
+	headers := map[string]string{"Authorization": "Bearer " + userToken}
+	params := map[string]string{"ids": strings.Join(artistIDs, ",")}
+	// make request to spotify server
+	resp, err := makeRequest(http.MethodGet, url, headers, params, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error searching Spotify: %v", err)
+	}
+	defer resp.Body.Close()
+	var spotifyResponse map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&spotifyResponse)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding Spotify response: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("error searching Spotify, status code not 200, status: %d, response: %v", resp.StatusCode, spotifyResponse)
+	}
+	for _, artist := range spotifyResponse["artists"].([]any) {
+		artistMap := artist.(map[string]any)
+		newArtist, err := artistDataHandler(artistMap)
+		if err != nil {
+			fmt.Printf("Error adding artist %v\n", err)
+			continue
+		}
+		newArtists = append(newArtists, newArtist)
+	}
+	return newArtists, nil
+}
+
+func artistDataHandler(artist map[string]any) (Artist, error) {
+	// given an artist map, extract the data and return an Artist struct
+	images := artist["images"].([]any)
+
+	var image string
+	var smallImage string
+	if len(images) > 0 {
+		image = images[0].(map[string]any)["url"].(string)
+		if len(images) > 1 {
+			smallImage = images[len(images)-1].(map[string]any)["url"].(string)
+		}
+	}
+
+	new_artist := Artist{
+		ID:          artist["id"].(string),
+		Name:        artist["name"].(string),
+		Image:       image,
+		SmallImage:  smallImage,
+		LastUpdated: 0, // set to as far in the past as possible to show unset
+	}
+	return new_artist, nil
+}
+
+func albumDataHandler(albumMap map[string]any, userToken string) (Album, []string, error) {
+	// given an album, get the data, and get the artists as a list of strings
+	// get artists for album
+	artists := albumMap["artists"].([]any)
+	artistIDStrings := make([]string, len(artists))
+	for i, artist := range artists {
+		artistIDStrings[i] = artist.(map[string]any)["id"].(string)
+	}
+	date, err := parseReleaseDate(albumMap["release_date"].(string), albumMap["release_date_precision"].(string))
+	if err != nil {
+		return Album{}, nil, err
+	}
+	var image string
+	if len(albumMap["images"].([]any)) == 0 {
+		image = ""
+	} else {
+		image = albumMap["images"].([]any)[0].(map[string]any)["url"].(string)
+	}
+
+	var smallImage string
+	if len(albumMap["images"].([]any)) > 2 {
+		smallImage = albumMap["images"].([]any)[len(albumMap["images"].([]any))-1].(map[string]any)["url"].(string)
+	} else {
+		smallImage = image
+	}
+	newAlbum := Album{
+		ID:          albumMap["id"].(string),
+		Title:       albumMap["name"].(string),
+		Image:       image,
+		SmallImage:  smallImage,
+		IsFull:      0,
+		ReleaseDate: date,
+		ArtistsIDs:  artistIDStrings,
+		ArtistsNames: func() []string {
+			names := make([]string, len(artists))
+			for i, artist := range artists {
+				names[i] = artist.(map[string]any)["name"].(string)
+			}
+			return names
+		}(),
+	}
+	for _, artistID := range artistIDStrings {
+		err = addArtistAlbum(artistID, newAlbum.ID)
+		if err != nil {
+			fmt.Printf("Error adding artist_album %v\n", err)
+		}
+	}
+	return newAlbum, artistIDStrings, nil
+}
+
 func trackHandler(c *gin.Context) {
 
-	_, err := validateSession(c)
+	_, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
 	}
 
-	id := c.Query("id")
-	track := Track{}
-	err = db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Error getting track" + err.Error()})
-		return
-	}
-	if c.Query("download") == "true" {
-		queueDownloads([]string{track.ID}, true)
-	}
-	c.JSON(200, gin.H{
-		"track": track,
-	})
-}
-
-// Parameters: username, password, id
-// Returns: album
-// gets album from db by album id
-func albumHandler(c *gin.Context) {
-	_, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-
-	id := c.Query("id")
-	album := Album{}
-	err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", id)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Error getting album " + err.Error()})
-		return
-	}
-	c.JSON(200, gin.H{
-		"album": album,
-	})
-}
-
-// Parameters: username, password, id
-// Returns: list of artist IDs (strings)
-// gets album artists from db by album id
-func albumArtistHandler(c *gin.Context) {
-	_, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-
-	albumID := c.Query("id")
-	albumArtists := []Album_Artist{}
-	err = db.Select(&albumArtists, "SELECT DISTINCT artist_id FROM album_artists WHERE album_id = ?", albumID)
-	if err != nil {
-		fmt.Printf("Error: %v", err)
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	// make into a list of artist IDs
-	artistIDs := []string{}
-	for _, albumArtist := range albumArtists {
-		artistIDs = append(artistIDs, albumArtist.Artist_ID)
-	}
-	// get artist names from db
-	// TODO: make this one query
-	artists := []Artist{}
-	for _, artistID := range artistIDs {
-		err = db.Select(&artists, "SELECT * FROM artists WHERE id = ?", artistID)
-		if err != nil {
-			fmt.Printf("Error: %v", err)
-			c.JSON(500, gin.H{"Error": "Internal server error"})
-			return
+	ids := c.Query("ids")
+	idsList := strings.Split(ids, ",")
+	tracks := []Track{}
+	for _, id := range idsList {
+		if id != "" {
+			var track Track
+			err = db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
+			if err != nil {
+				c.JSON(500, gin.H{"Error": "Error getting track" + err.Error()})
+				return
+			}
+			tracks = append(tracks, track)
 		}
 	}
-	// make into a list of artist names
-	artistNames := []string{}
-	for _, artist := range artists {
-		artistNames = append(artistNames, artist.Name)
+	if c.Query("download") == "true" {
+		queueDownloads(idsList, true)
 	}
-
 	c.JSON(200, gin.H{
-		"artistIDs":    artistIDs,
-		"artistsNames": artistNames,
+		"tracks": tracks,
 	})
 }
 
-// Parameters: username, password, id
-// Returns: artist
-// gets artist from db by artist id
+// will update album if isfull = 0
+func albumHandler(c *gin.Context) {
+	_, err := validateToken(c)
+	if err != nil {
+		c.JSON(401, gin.H{"Error": err.Error()})
+		return
+	}
+
+	ids := c.Query("ids")
+	idsList := strings.Split(ids, ",")
+	albums := []Album{}
+	for _, id := range idsList {
+		var album Album
+		err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", id)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting album " + err.Error()})
+			return
+		}
+		albums = append(albums, album)
+	}
+	c.JSON(200, gin.H{
+		"albums": albums,
+	})
+}
+
+// will update artist if last_updated is older than a day
 func artistHandler(c *gin.Context) {
-	_, err := validateSession(c)
+	_, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
 	}
 
-	id := c.Query("id")
-	artist := Artist{}
-	err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", id)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
+	ids := c.Query("ids")
+	idsList := strings.Split(ids, ",")
+	artists := []Artist{}
+	for _, id := range idsList {
+		var artist Artist
+		err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", id)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting artist " + err.Error()})
+			return
+		}
+		artists = append(artists, artist)
 	}
 	c.JSON(200, gin.H{
-		"artist": artist,
+		"artists": artists,
 	})
 }
 
-// Parameters: username, password, id
-// Returns: playlist, tracks
-// gets playlist from db by playlist id and all tracks in the playlist
+// if id = "", get all playlists for user
 func playlistHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
 	}
 
-	playlistID := c.Query("playlistID")
+	playlistID := c.Query("id")
+	if playlistID == "" {
+		playlists := []Playlist{}
+		// just get all playlists for user
+		db.Select(&playlists, "SELECT * FROM playlists WHERE username = ?", username)
+		c.JSON(200, gin.H{
+			"playlists": playlists,
+		})
+		return
+	}
+
 	isOwner, err := isPlaylistOwner(username, playlistID)
 	if err != nil {
 		c.JSON(403, gin.H{"Error": err.Error()})
@@ -574,130 +624,7 @@ func playlistHandler(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{
-		"playlist": playlist,
-	})
-}
-
-// Parameters: username, password, id
-// Returns: albums, spotify_albums, number_of_albums, number_queried
-// gets all albums for an artist from db and spotify
-func artistAlbumsHandler(c *gin.Context) {
-	username, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-
-	artistID := c.Query("id")
-
-	albums := []Album{}
-	album_artists := []Album_Artist{}
-
-	// get Artist from db
-	artist := Artist{}
-	err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", artistID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	// see if the timestamp is older than a day
-	// TDDO: make this faster
-	if artist.LastUpdated < (time.Now().Unix() - 86400) {
-		// search spotify to update
-		userToken, err := getValidToken(username)
-		if err != nil {
-			c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
-			return
-		}
-		albums, err = getSpotifyAlbumsForArtist(userToken, artistID)
-		if err != nil {
-			c.JSON(500, gin.H{"Error": "Internal server error"})
-			return
-		}
-		c.JSON(200, gin.H{
-			"albums":           albums,
-			"number_of_albums": len(albums),
-		})
-		return
-	}
-	// else get albums from db
-	err = db.Select(&album_artists, "SELECT * FROM album_artists WHERE artist_id = ?", artistID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	for _, album_artist := range album_artists {
-		album := Album{}
-		err := db.Get(&album, "SELECT * FROM albums WHERE id = ?", album_artist.Album_ID)
-		if err != nil {
-			fmt.Printf("Error: %v", err)
-			c.JSON(500, gin.H{"Error": "Internal server error 2"})
-			return
-		}
-		albums = append(albums, album)
-	}
-	c.JSON(200, gin.H{
-		"albums":           albums,
-		"number_of_albums": len(albums),
-	})
-}
-
-// Parameters: username, password, id, spotify (optional), db (optional)
-// Returns: tracks, spotify_tracks, number_of_tracks, number_queried
-// gets all tracks for an album from db and spotify
-func albumTracksHandler(c *gin.Context) {
-	username, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-
-	albumID := c.Query("id")
-
-	// get album from db
-	album := Album{}
-	err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", albumID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	if album.IsFull != 0 {
-		// album is already full, no need to search spotify
-		tracks := []Track{}
-		err = db.Select(&tracks, "SELECT * FROM tracks WHERE album_id = ?", albumID)
-		if err != nil {
-			c.JSON(500, gin.H{"Error": "Internal server error"})
-			return
-		}
-		c.JSON(200, gin.H{
-			"tracks":           tracks,
-			"number_of_tracks": len(tracks),
-		})
-		return
-	}
-
-	userToken, err := getValidToken(username)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	tracks, err := getSpotifyTracksForAlbum(userToken, albumID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	// set album to full
-	_, err = db.Exec("UPDATE albums SET isfull = ? WHERE id = ?", 1, albumID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	c.JSON(200, gin.H{
-		"tracks":           tracks,
-		"number_of_tracks": len(tracks),
+		"playlists": playlist,
 	})
 }
 
@@ -706,7 +633,7 @@ func getSpotifyAlbumsForArtist(userToken string, artistID string) ([]Album, erro
 	index := 0
 	limit, err := strconv.Atoi(spotify_query_limit)
 	if err != nil {
-		fmt.Printf("Error converting spotify_query_limit to int: %v\n", err)
+		// fmt.Printf("Error converting spotify_query_limit to int: %v\n", err)
 		limit = 50
 	}
 	number_of_albums := 0.0
@@ -734,21 +661,13 @@ func getSpotifyAlbumsForArtist(userToken string, artistID string) ([]Album, erro
 
 		// new albums
 		for _, album := range spotifyResponse["items"].([]any) {
-			smallimage := album.(map[string]any)["images"].([]any)[len(album.(map[string]any)["images"].([]any))-1].(map[string]any)["url"].(string)
-
-			// get release_date and release_date_precision
-			release_date := album.(map[string]any)["release_date"].(string)
-			release_date_precision := album.(map[string]any)["release_date_precision"].(string)
-			release_date_int, _ := parseReleaseDate(release_date, release_date_precision)
-
-			new_album := Album{
-				ID:          album.(map[string]any)["id"].(string),
-				Title:       album.(map[string]any)["name"].(string),
-				Image:       album.(map[string]any)["images"].([]any)[0].(map[string]any)["url"].(string),
-				SmallImage:  smallimage,
-				IsFull:      0,
-				ReleaseDate: release_date_int,
+			albumMap := album.(map[string]any)
+			new_album, _, err := albumDataHandler(albumMap, userToken)
+			if err != nil {
+				fmt.Printf("Error handling album data: %v\n", err)
+				continue
 			}
+
 			err = AddAlbum(new_album)
 			if err != nil {
 				fmt.Printf("Error adding album %v\n", err)
@@ -757,22 +676,22 @@ func getSpotifyAlbumsForArtist(userToken string, artistID string) ([]Album, erro
 		}
 		index += limit
 	}
+	// update artist last updated time and the albums
+	_, err = db.Exec("UPDATE artists SET last_updated = ? WHERE id = ?", time.Now().Unix(), artistID)
+	if err != nil {
+		fmt.Printf("Error updating artist last updated time: %v\n", err)
+	}
+
 	return albumsList, nil
 }
 
-func getSpotifyTracksForAlbum(userToken string, albumID string) ([]Track, error) {
+func getSpotifyTracksForAlbum(userToken string, albumID string, image string, smallImage string) ([]Track, error) {
 	// search spotify
 	index := 0
 	limit, err := strconv.Atoi(spotify_query_limit)
 	if err != nil {
-		fmt.Printf("Error converting spotify_query_limit to int: %v\n", err)
+		// fmt.Printf("Error converting spotify_query_limit to int: %v\n", err)
 		limit = 50
-	}
-	// get album
-	album := Album{}
-	err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", albumID)
-	if err != nil {
-		return nil, fmt.Errorf("error getting album from db: %v", err)
 	}
 	number_of_tracks := 0.0
 	tracksList := []Track{}
@@ -800,85 +719,42 @@ func getSpotifyTracksForAlbum(userToken string, albumID string) ([]Track, error)
 		// new tracks
 		for _, track := range spotifyResponse["items"].([]any) {
 			track_id := track.(map[string]any)["id"].(string)
-			new_track := Track{ID: track_id, Title: track.(map[string]any)["name"].(string), Album: albumID, IsDownloaded: 0, Image: album.Image, SmallImage: album.SmallImage}
+			new_track := Track{
+				ID:           track_id,
+				Title:        track.(map[string]any)["name"].(string),
+				AlbumID:      albumID,
+				IsDownloaded: 0,
+				Image:        image,
+				SmallImage:   smallImage,
+				ArtistsIDs: func() []string {
+					ids := make([]string, len(track.(map[string]any)["artists"].([]any)))
+					for i, artist := range track.(map[string]any)["artists"].([]any) {
+						ids[i] = artist.(map[string]any)["id"].(string)
+					}
+					return ids
+				}(),
+				ArtistsNames: func() []string {
+					names := make([]string, len(track.(map[string]any)["artists"].([]any)))
+					for i, artist := range track.(map[string]any)["artists"].([]any) {
+						names[i] = artist.(map[string]any)["name"].(string)
+					}
+					return names
+				}(),
+			}
 			err = AddTrack(new_track)
 			if err != nil {
-				fmt.Printf("Error adding album %v\n", err)
+				fmt.Printf("Error adding track %v\n", err)
 			}
 			tracksList = append(tracksList, new_track)
 		}
 		index += limit
 	}
+	// update album last updated time and set to full
+	_, err = db.Exec("UPDATE albums SET isfull = ? WHERE id = ?", 1, albumID)
+	if err != nil {
+		fmt.Printf("Error updating album isfull: %v\n", err)
+	}
 	return tracksList, nil
-}
-
-// Parameters: username, password, id, spotify (optional)
-// Returns: url for the image
-// gets image from spotify for an artist if it is not found in the db
-func artistImageHandler(c *gin.Context) {
-	username, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-
-	artistID := c.Query("id")
-	artist := Artist{}
-	err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", artistID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	if artist.Image == "" {
-		get_spotify := c.Query("spotify") == "true"
-		if get_spotify {
-			userToken, err := getValidToken(username)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
-				return
-			}
-			url := "https://api.spotify.com/v1/artists/" + artistID
-			headers := map[string]string{"Authorization": "Bearer " + userToken}
-			// make request to spotify server
-			resp, err := makeRequest(http.MethodGet, url, headers, nil, nil)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Error searching Spotify"})
-				return
-			}
-			// read response
-			defer resp.Body.Close()
-			var spotifyResponse map[string]any
-			err = json.NewDecoder(resp.Body).Decode(&spotifyResponse)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Internal server error"})
-				return
-			}
-			images, ok := spotifyResponse["images"].([]any)
-			if ok && len(images) > 0 {
-				imageMap, ok := images[0].(map[string]any)
-				if ok {
-					url, ok := imageMap["url"].(string)
-					if ok {
-						artist.Image = url
-					}
-				}
-			}
-
-			_, err = db.Exec("UPDATE artists SET image = ? WHERE id = ?", artist.Image, artistID)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Internal server error"})
-				return
-			}
-			_, err = db.Exec("UPDATE artists SET image = ? WHERE id = ?", artist.Image, artistID)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Internal server error"})
-				return
-			}
-		}
-	}
-	c.JSON(200, gin.H{
-		"image": artist.Image,
-	})
 }
 
 func parseReleaseDate(release_date string, release_date_precision string) (int, error) {
@@ -931,101 +807,8 @@ func parseReleaseDate(release_date string, release_date_precision string) (int, 
 	}
 }
 
-func getTracksInfo(c *gin.Context) {
-	_, err := validateSession(c)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-	tracks := c.Query("ids")
-	trackIDs := strings.Split(tracks, ",")
-	
-	
-	tracksList := []Track{}
-	query, args, err := sqlx.In("SELECT * FROM tracks WHERE id IN (?)", trackIDs)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	query = db.Rebind(query)
-	err = db.Select(&tracksList, query, args...)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	albumIDs := make([]string, 0, len(tracksList))
-	for _, t := range tracksList {
-		albumIDs = append(albumIDs, t.Album)
-	}
-
-	albumArtists := []Album_Artist{}
-	query, args, err = sqlx.In("SELECT DISTINCT album_id, artist_id FROM album_artists WHERE album_id IN (?)", albumIDs)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	query = db.Rebind(query)
-	err = db.Select(&albumArtists, query, args...)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	artistIDSet := map[string]struct{}{}
-	for _, aa := range albumArtists {
-		artistIDSet[aa.Artist_ID] = struct{}{}
-	}
-	artistIDs := make([]string, 0, len(artistIDSet))
-	for id := range artistIDSet {
-		artistIDs = append(artistIDs, id)
-	}
-
-	artists := []Artist{}
-	query, args, err = sqlx.In("SELECT * FROM artists WHERE id IN (?)", artistIDs)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-	query = db.Rebind(query)
-	err = db.Select(&artists, query, args...)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
-
-	artistMap := map[string]string{}
-	for _, a := range artists {
-		artistMap[a.ID] = a.Name
-	}
-
-	albumArtistIDs := []string{}
-	albumArtistNames := []string{}
-	for _, t := range tracksList {
-		ids := []string{}
-		names := []string{}
-		for _, aa := range albumArtists {
-			if aa.Album_ID == t.Album {
-				ids = append(ids, aa.Artist_ID)
-				if name, ok := artistMap[aa.Artist_ID]; ok {
-					names = append(names, name)
-				}
-			}
-		}
-		albumArtistIDs = append(albumArtistIDs, strings.Join(ids, ","))
-		albumArtistNames = append(albumArtistNames, strings.Join(names, ", "))
-	}
-
-	c.JSON(200, gin.H{
-		"tracks":       tracksList,
-		"artistIDs":    albumArtistIDs,
-		"artistsNames": albumArtistNames,
-	})
-}
-
 func artistTracksHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -1033,7 +816,6 @@ func artistTracksHandler(c *gin.Context) {
 
 	artistID := c.Query("id")
 
-	tracks := []Track{}
 	// get Artist from db
 	artist := Artist{}
 	err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", artistID)
@@ -1050,51 +832,16 @@ func artistTracksHandler(c *gin.Context) {
 			c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
 			return
 		}
-		var albums []Album
-		albums, err = getSpotifyAlbumsForArtist(userToken, artistID)
+		_, err = getSpotifyAlbumsForArtist(userToken, artistID)
 		if err != nil {
 			c.JSON(500, gin.H{"Error": "Internal server error"})
 			return
 		}
-		// for all the new albums get the tracks
-		all_tracks := []Track{}
-		for _, album := range albums {
-			album_tracks, err := getSpotifyTracksForAlbum(userToken, album.ID)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": "Internal server error"})
-				return
-			}
-			all_tracks = append(all_tracks, album_tracks...)
-		}
-		// return tracks
-		c.JSON(200, gin.H{
-			"tracks":           all_tracks,
-			"number_of_tracks": len(all_tracks),
-		})
-		return
 	}
-	// else get tracks from db
-	album_artists := []Album_Artist{}
-	err = db.Select(&album_artists, "SELECT * FROM album_artists WHERE artist_id = ?", artistID)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
-		return
-	}
+	// get tracks from db
 
-	albumIDs := make([]string, 0, len(album_artists))
-	for _, aa := range album_artists {
-		albumIDs = append(albumIDs, aa.Album_ID)
-	}
-
-	if len(albumIDs) == 0 {
-		c.JSON(200, gin.H{
-			"tracks":           tracks,
-			"number_of_tracks": len(tracks),
-		})
-		return
-	}
-
-	query, args, err := sqlx.In("SELECT * FROM tracks WHERE album IN (?)", albumIDs)
+	tracks := []Track{}
+	query, args, err := sqlx.In("SELECT tracks.* FROM tracks where artist_id = ?", artistID)
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Internal server error"})
 		return
@@ -1102,6 +849,116 @@ func artistTracksHandler(c *gin.Context) {
 	query = db.Rebind(query)
 
 	err = db.Select(&tracks, query, args...)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"tracks":           tracks,
+		"number_of_tracks": len(tracks),
+	})
+}
+
+func artistAlbumsHandler(c *gin.Context) {
+	username, err := validateToken(c)
+	if err != nil {
+		c.JSON(401, gin.H{"Error": err.Error()})
+		return
+	}
+
+	artistID := c.Query("id")
+	// get artist from db
+	artist := Artist{}
+	err = db.Get(&artist, "SELECT * FROM artists WHERE id = ?", artistID)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": err.Error()})
+		return
+	}
+	albums := []Album{}
+
+	// see if the timestamp is older than a day
+	if artist.LastUpdated < (time.Now().Unix() - 86400) {
+		userToken, err := getValidToken(username)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
+			return
+		}
+
+		albums, err = getSpotifyAlbumsForArtist(userToken, artistID)
+
+		if err != nil {
+			c.JSON(500, gin.H{"Error": err.Error()})
+			return
+		}
+	} else {
+		albumIDs := []string{}
+		// get album ids from artist_albums
+		err = db.Select(&albumIDs, "SELECT album_id FROM artist_albums WHERE artist_id = ?", artistID)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": err.Error()})
+			return
+		}
+		if len(albumIDs) == 0 {
+			c.JSON(200, gin.H{
+				"albums": albums,
+			})
+			return
+		}
+		for _, id := range albumIDs {
+			var album Album
+			err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", id)
+			if err != nil {
+				c.JSON(500, gin.H{"Error": err.Error()})
+				return
+			}
+			albums = append(albums, album)
+		}
+	}
+	c.JSON(200, gin.H{
+		"albums": albums,
+	})
+}
+
+func albumTracksHandler(c *gin.Context) {
+	username, err := validateToken(c)
+	if err != nil {
+		c.JSON(401, gin.H{"Error": err.Error()})
+		return
+	}
+
+	albumID := c.Query("id")
+
+	// get Album from db
+	album := Album{}
+	err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", albumID)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Internal server error"})
+		return
+	}
+
+	// if album is not full, get tracks from spotify
+	if album.IsFull == 0 {
+		userToken, err := getValidToken(username)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Error getting user token" + err.Error()})
+			return
+		}
+		_, err = getSpotifyTracksForAlbum(userToken, albumID, album.Image, album.SmallImage)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Internal server error"})
+			return
+		}
+	}
+	// set isfull to 1
+	_, err = db.Exec("UPDATE albums SET isfull = ? WHERE id = ?", 1, albumID)
+	if err != nil {
+		fmt.Printf("Error updating album isfull: %v\n", err)
+	}
+
+	// get tracks from db
+	tracks := []Track{}
+	err = db.Select(&tracks, "SELECT * FROM tracks WHERE album_id = ?", albumID)
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Internal server error"})
 		return
