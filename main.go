@@ -1,19 +1,20 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 )
-
 var musicDir string
 var fileExtension string
 var spotify_query_limit string
-var disable_auth bool
 var enable_download bool
-var disable_auth_warnings bool
+var max_db_to_fetch int = 20
+var cookie_path string
 
 // Init function to load .env file and setup database connection
 func init() {
@@ -27,15 +28,40 @@ func init() {
 	if spotify_query_limit == "" {
 		spotify_query_limit = "50"
 	}
-	disable_auth = os.Getenv("DISABLE_AUTH") == "true"	
-	disable_auth_warnings = os.Getenv("DISABLE_AUTH_WARNINGS") == "true"
 
-	// Note: DO NOT set to true. Use your own music collection. Setting this to true will use yt-dlp to download music.
+	max_db_to_fetch_str := os.Getenv("MAX_DB_TO_FETCH")
+	if max_db_to_fetch_str == "" {
+		max_db_to_fetch = 20
+	} else {
+		max_db_to_fetch, err = strconv.Atoi(max_db_to_fetch_str)
+		if err != nil {
+			log.Printf("Error parsing MAX_DB_TO_FETCH: %v\n", err)
+		}
+	}
+
+	cookie_path = os.Getenv("COOKIE_PATH") // path to browser cookies for youtube login
+	
+	enable_download_str := os.Getenv("ENABLE_DOWNLOAD")
+	if enable_download_str == "I accept the risks" {
+		enable_download = true
+		fmt.Println("Downloads enabled")
+	} else {
+		enable_download = false
+	}
 	setupDB()
+
 }
 
 // Main function to start the server and handle token refresh
 func main() {
-	// setup log file
 	ApiSetUp()
+}
+func cleanup() {
+	// Close the database connection when the application exits
+	fmt.Println("\nCleaning up...")
+	// save the current refresh tokens
+	saveAllRefreshTokens()
+	if db != nil {
+		db.Close()
+	}
 }
