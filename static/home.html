@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Music Player</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="static/styles.css">
+</head>
+
+<body>
+  <div class="page-header">
+    <button class="settings-btn" onclick="goHome()" style="background: none; border: none;">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="green">
+        <title>home-circle</title>
+        <path
+          d="M19.07,4.93C17.22,3 14.66,1.96 12,2C9.34,1.96 6.79,3 4.94,4.93C3,6.78 1.96,9.34 2,12C1.96,14.66 3,17.21 4.93,19.06C6.78,21 9.34,22.04 12,22C14.66,22.04 17.21,21 19.06,19.07C21,17.22 22.04,14.66 22,12C22.04,9.34 21,6.78 19.07,4.93M17,12V18H13.5V13H10.5V18H7V12H5L12,5L19.5,12H17Z" />
+      </svg>
+    </button>
+    <div class="search-container" id="search-container">
+      <input type="text" class="search-bar" id="search-bar" placeholder="Songs, artists, albums, or playlists" />
+    </div>
+    <button class="settings-btn" onclick="settings()" style="background: none; border: none;">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="green"
+        id="settings-icon">
+        <title>settings</title>
+        <path
+          d="M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z" />
+      </svg>
+    </button>
+  </div>
+  <div class="container">
+    <!-- Content Area -->
+    <div class="content">
+      <!-- Home Tab -->
+      <div id="home-tab" class="tab-content active">
+        <div class="playlist-grid" id="playlist-grid">
+          <!-- Filled with JS -->
+        </div>
+      </div>
+
+      <!-- Search Tab -->
+      <div id="search-tab" class="tab-content"></div>
+
+      <!-- Settings Tab -->
+      <div id="settings-tab" class="tab-content">
+        <div class="settings-list">
+          <div class="settings-item">
+            <div class="settings-title">Settings</div>
+          </div>
+          <div class="settings-item">
+            <div class="settings-title">Account</div>
+          </div>
+          <div class="settings-item">
+            <div class="settings-title">About</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Options Popup -->
+      <div class="popup-overlay" id="popupOverlay">
+        <div class="popup-container">
+          <div class="popup-song-info" id="popupSongInfo">
+          </div>
+          <div class="popup-buttons">
+            <button class="popup-button" id="popup-button-queue">
+              <i>➕</i> Add to queue
+            </button>
+            <button class="popup-button" id="popup-button-playlist">
+              <i>💾</i> Save to playlist
+            </button>
+            <button class="popup-button" id="popup-button-album">
+              <i>💿</i> Go to album
+            </button>
+            <button class="popup-button" id="popup-button-artist">
+              <i>🎤</i> Go to artist
+            </button>
+            <button class="popup-button" id="popup-button-share-spotify">
+              <i>🎵</i> Share Spotify
+            </button>
+            <button class="popup-button" id="popup-button-share-youtube">
+              <i>▶️</i> Share YouTube Music
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Playlist popup -->
+      <div class="popup-overlay" id="playlistOverlay">
+        <div class="popup-container" id="playlistPopup">
+          <div class="popup-header">
+            <h2>Create Playlist</h2>
+          </div>
+          <div class="popup-playlist-content">
+            <input type="text" id="playlist-name-input" class="playlist-name-input" placeholder="Playlist Name" />
+            <button class="create-playlist-btn" id="create-playlist-btn">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="white">
+                <title>plus</title>
+                <path d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" />
+              </svg></button>
+          </div>
+          <div class="popup-playlist-content-main" id="playlist-container">
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Album View -->
+      <div id="album-tab" class="tab-content">
+        <button onclick="goHome()"
+          style="background: none; border: none; color: white; font-size: 1.5rem; margin-right: 10px;">←</button>
+        <div class="album-cover-container">
+          <img src="./static/testimage.png" alt="Album Cover" class="album-cover" id="album-image" />
+        </div>
+        <h1 id="album-title">Album</h1>
+        <div id="album-subtitle" class="album-date"></div>
+        <div class="playlist-actions" style="display: flex; gap: 16px; margin-bottom: 24px;">
+          <button class="control-btn" id="album-play-button" onclick="playAlbum()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>play</title>
+              <path
+                d="M10,16.5V7.5L16,12M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="songs-list" id="album-songs">
+
+
+          <!-- Songs will be populated by JavaScript -->
+        </div>
+      </div>
+
+      <!-- Artist View -->
+      <div id="artist-tab" class="tab-content">
+        <button onclick="goHome()"
+          style="background: none; border: none; color: white; font-size: 1.5rem; margin-right: 10px;">←</button>
+        <div class="album-cover-container">
+          <img src="./static/testimage.png" alt="Artist Image" class="album-cover" id="artist-image" />
+        </div>
+        <h1 id="artist-name">Artist</h1>
+        <div class="playlist-actions" style="display: flex; gap: 16px; margin-bottom: 24px;">
+          <button class="control-btn" id="artist-play-button" onclick="playArtist()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>play</title>
+              <path
+                d="M10,16.5V7.5L16,12M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="songs-list" id="artist-albums">
+
+
+          <!-- Songs will be populated by JavaScript -->
+        </div>
+      </div>
+
+      <!-- Playlist View -->
+      <div id="playlist-tab" class="tab-content">
+        <div class="playlist-header" style="margin-bottom: 20px;">
+          <button onclick="goHome()"
+            style="background: none; border: none; color: white; font-size: 1.5rem; margin-right: 10px;">←</button>
+          <h1 id="playlist-name">Playlist</h1>
+        </div>
+        <div class="playlist-actions" style="display: flex; gap: 16px; margin-bottom: 24px;">
+          <button class="control-btn" id="playlist-play-button" onclick="playPlaylist()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>play</title>
+              <path
+                d="M10,16.5V7.5L16,12M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z" />
+            </svg>
+          </button>
+          <button class="control-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%"
+              onclick="playPlaylist(null,null,true)" id="playlist-shuffle-button">
+              <title>shuffle</title>
+              <path
+                d="M14.83,13.41L13.42,14.82L16.55,17.95L14.5,20H20V14.5L17.96,16.54L14.83,13.41M14.5,4L16.54,6.04L4,18.59L5.41,20L17.96,7.46L20,9.5V4M10.59,9.17L5.41,4L4,5.41L9.17,10.58L10.59,9.17Z" />
+            </svg>
+          </button>
+
+          <button class="control-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%"
+              onclick="publicPlaylist()" id="playlist-public-button">
+              <title>public-disabled</title>
+              <path
+                d="M22,5.27L20.5,6.75C21.46,8.28 22,10.07 22,12A10,10 0 0,1 12,22C10.08,22 8.28,21.46 6.75,20.5L5.27,22L4,20.72L20.72,4L22,5.27M17.9,17.39C19.2,15.97 20,14.08 20,12C20,10.63 19.66,9.34 19.05,8.22L14.83,12.44C14.94,12.6 15,12.79 15,13V16H16C16.89,16 17.64,16.59 17.9,17.39M11,19.93V18C10.5,18 10.07,17.83 9.73,17.54L8.22,19.05C9.07,19.5 10,19.8 11,19.93M15,4.59V5A2,2 0 0,1 13,7H11V9A1,1 0 0,1 10,10H8V12H10.18L8.09,14.09L4.21,10.21C4.08,10.78 4,11.38 4,12C4,13.74 4.56,15.36 5.5,16.67L4.08,18.1C2.77,16.41 2,14.3 2,12A10,10 0 0,1 12,2C14.3,2 16.41,2.77 18.1,4.08L16.67,5.5C16.16,5.14 15.6,4.83 15,4.59Z" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="songs-list" id="playlist-songs">
+
+
+          <!-- Songs will be populated by JavaScript -->
+        </div>
+      </div>
+
+      <!-- Mini Player -->
+      <div class="mini-player" id="mini-player" onclick="showFullPlayer()">
+        <div class="mini-player-holder">
+          <img src="./static/testimage.png" alt="Song" class="mini-player-image" id="mini-img" />
+          <div class="mini-player-details">
+            <div class="mini-player-title" id="mini-title">Song Title That is really really long and idk why its this
+              long but it is</div>
+            <div class="mini-player-artist" id="mini-artist">Artist That is really really long and idk why its this
+              long
+              but it is</div>
+          </div>
+        </div>
+        <div class="mini-player-controls" onclick="play()">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%"
+            class="play-button">
+            <title>pause</title>
+            <path
+              d="M13,16V8H15V16H13M9,16V8H11V16H9M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- Full Player View -->
+      <div class="full-player" id="full-player">
+        <div class="player-header">
+          <button class="close-player" onclick="hideFullPlayer()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>chevron-down</title>
+              <path d="M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="cover-art-container">
+          <img src="./static/testimage.png" alt="Album Cover" class="cover-art" id="full-img" />
+        </div>
+        <div class="song-info">
+          <div class="current-title" id="full-title">Song Title That Is Super Long And IDK Why it is this long</div>
+          <div class="current-artist" id="full-artist">Artist Name That Is Super Long And IDK Why it is this long
+          </div>
+        </div>
+
+
+
+        <div class="actions">
+          <button class="action-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%"
+              id="like-button" class="like-button" onclick="like()">
+              <title>like</title>
+              <path
+                d="M5,9V21H1V9H5M9,21A2,2 0 0,1 7,19V9C7,8.45 7.22,7.95 7.59,7.59L14.17,1L15.23,2.06C15.5,2.33 15.67,2.7 15.67,3.11L15.64,3.43L14.69,8H21C22.11,8 23,8.9 23,10V12C23,12.26 22.95,12.5 22.86,12.73L19.84,19.78C19.54,20.5 18.83,21 18,21H9M9,19H18.03L21,12V10H12.21L13.34,4.68L9,9.03V19Z" />
+            </svg>
+          </button>
+          <button class="action-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>download</title>
+              <path d="M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" />
+            </svg>
+          </button>
+          <button class="action-btn" id="playlist-add-button" onclick="addToPlaylist()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>playlist-add</title>
+              <path d="M3 16H10V14H3M18 14V10H16V14H12V16H16V20H18V16H22V14M14 6H3V8H14M14 10H3V12H14V10Z" />
+            </svg>
+            <!-- <span class="action-text">Add</span> -->
+          </button>
+          <button class="action-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>shuffle</title>
+              <path
+                d="M14.83,13.41L13.42,14.82L16.55,17.95L14.5,20H20V14.5L17.96,16.54L14.83,13.41M14.5,4L16.54,6.04L4,18.59L5.41,20L17.96,7.46L20,9.5V4M10.59,9.17L5.41,4L4,5.41L9.17,10.58L10.59,9.17Z" />
+            </svg>
+          </button>
+        </div>
+
+
+
+
+        <!-- range -->
+        <div class="range-wrapper">
+          <span class="label-md" data-running-time>0:00</span>
+
+          <input type="range" step="1" max="60" value="0" class="range" data-range data-seek>
+          <span class="label-md" data-duration>1:00</span>
+        </div>
+
+
+
+        <div class="controls">
+          <button class="control-btn" id="prev-button" onclick="skipToPreviousSong()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>skip-previous</title>
+              <path d="M6,18V6H8V18H6M9.5,12L18,6V18L9.5,12Z" />
+            </svg>
+          </button>
+
+
+          <button class="play-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%"
+              class="play-button" onclick="play()">
+              <title>pause</title>
+              <path
+                d="M13,16V8H15V16H13M9,16V8H11V16H9M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z" />
+            </svg>
+          </button>
+
+
+          <button class="control-btn" id="next-button" onclick="skipToNextSong()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>skip-next</title>
+              <path d="M16,18H18V6H16M6,18L14.5,12L6,6V18Z" />
+            </svg>
+          </button>
+
+        </div>
+
+        <div class="up-next" onclick="nextSongs()">
+          <h3 class="next-title">Up Next</h3>
+        </div>
+      </div>
+
+      <!-- Next Songs -->
+      <div class="next-songs" id="next-songs">
+        <div class="player-header">
+          <button class="close-player" onclick="hideNextSongs()">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="100%" height="100%">
+              <title>chevron-down</title>
+              <path d="M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z" />
+            </svg>
+          </button>
+        </div>
+        <h3 class="next-title">Up Next</h3>
+        <div class="songs-list" id="upnext-songs">
+        </div>
+      </div>
+
+
+      <!-- Audio Elements -->
+      <audio id="audio1">
+        Your browser does not support the audio element.
+      </audio>
+      <audio id="audio2">
+        Your browser does not support the audio element.
+      </audio>
+      <audio id="audio3">
+        Your browser does not support the audio element.
+      </audio>
+
+
+</body>
+<script type="text/javascript" src="static/index.js" defer></script>
+
+</html>

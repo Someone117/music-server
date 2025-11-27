@@ -1,6 +1,10 @@
 .env
 music.db
-music
+music/*.mp3
+music/.venv
+music/yt-dlp
+music/resetdownloads.sqbpro
 templates
 music-server
 music.db*
+cert/*

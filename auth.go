@@ -12,14 +12,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/gin-gonic/gin"
 )
 
 var (
-	redirectURL = "http://localhost:8080/callback"
-	oauthState  = "random_state_string"
+	redirectURL = "https://100.79.93.20:8080/callback"
 	AuthURL     = "https://accounts.spotify.com/authorize"
 	TokenURL    = "https://accounts.spotify.com/api/token"
+	jwtKey      = []byte("my_secret_key")
+	refreshKey  = []byte("my_refresh_key")
 )
 
 // UserToken holds the token and expiry for a user
@@ -33,7 +36,14 @@ var (
 	userTokens    = make(map[string]*UserToken)
 	mu_usertokens sync.Mutex
 	usernames     = make(map[string]string)
+	refreshTokens = make(map[string]string) // token -> username
+	oauthStates   = make(map[string]string) // state -> username
 )
+
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
 
 func validateUser(username string, password string) error {
 	// check if user exists
@@ -44,76 +54,49 @@ func validateUser(username string, password string) error {
 	return nil
 }
 
-func validateSession(c *gin.Context) (string, error) {
+func validateToken(c *gin.Context) (string, error) {
 	// check if user exists
-	sessionID, err := c.Cookie("session_id")
-	if disable_auth {
-		if !disable_auth_warnings {
-			fmt.Println("AUTHENTICATION DISABLED - USING TEST USER")
-			fmt.Println("PLEASE DO NOT USE IN PRODUCTION")
-			fmt.Println("THIS IS FOR TESTING PURPOSES ONLY")
-			fmt.Println("WARNING: DO NOT USE IN PRODUCTION")
-		}
-		return "test", nil
+	token := c.GetHeader("Authorization")
+	if token == "" || len(token) <= len("Bearer ") {
+		return "", fmt.Errorf("authorization header missing")
 	}
-	if err != nil {
-		return "", fmt.Errorf("session ID not found")
-	}
-	username, ok := usernames[sessionID]
-	if username == "test" {
-		if !disable_auth_warnings {
-			fmt.Println("TEST USER DETECTED DURING PRODUCTION")
-			fmt.Println("THIS SHOULD NOT HAPPEN")
-			fmt.Println("PLEASE USE A REAL USER")
-			fmt.Println("ALSO PLEASE SECURE THE SERVER BY DISABLING THE TEST USER")
-		}
-		return "", fmt.Errorf("invalid username or password")
-	}
+		token = token[len("Bearer "):]
+
+	username, ok := usernames[token]
 	if !ok {
-		return "", fmt.Errorf("invalid username or password")
+		return "", fmt.Errorf("invalid token")
 	}
 	return username, nil
 }
 
-func generateSessionID() string {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
-	if err != nil {
-		log.Fatalf("failed to generate session ID: %v", err)
+func saveAllRefreshTokens() {
+	for token, username := range refreshTokens {
+		_, ok := users[username]
+		if !ok {
+			log.Printf("User %s not found while saving refresh token\n", username)
+			continue
+		}
+		// save to db
+		_, err := db.Exec("UPDATE users SET refresh_token = ? WHERE username = ?", token, username)
+		if err != nil {
+			log.Printf("failed to update refresh token in db for user %s: %v", username, err)
+		}
 	}
-	return hex.EncodeToString(b)
 }
 
-func loginPageHandler(c *gin.Context) {
-	// Render the login page
-	c.HTML(http.StatusOK, "login.html", gin.H{
-		"title": "Login",
-	})
-}
-
-func homeHandler(c *gin.Context) {
-	// Check if the user is logged in
-	sessionID, err := c.Cookie("session_id")
-	if err != nil {
-		c.Redirect(http.StatusFound, "/loginPage")
-		return
+func loadAllRefreshTokens() {
+	for username, user := range users {
+		if user.Refresh_Token == "-1" || user.Refresh_Token == "" {
+			continue
+		}
+		refreshTokens[user.Refresh_Token] = username
 	}
-	_, exists := usernames[sessionID]
-	if !exists {
-		c.Redirect(http.StatusFound, "/loginPage")
-		return
-	}
-
-	c.HTML(http.StatusOK, "home.html", gin.H{
-		"title": "Home",
-	})
 }
 
 // Parameters: username, password
 // Returns: redirects to /callback
 // Logs in the user and redirects to Spotify OAuth
 func loginHandler(c *gin.Context) {
-	sessionID := generateSessionID()
 	username := c.Query("username")
 	password := c.Query("password")
 	// check if user exists
@@ -125,8 +108,6 @@ func loginHandler(c *gin.Context) {
 
 	_, err = getValidToken(username)
 	if err != nil {
-		usernames[sessionID] = username
-
 		parsedURL, err := url.Parse(AuthURL)
 		if err != nil {
 			c.JSON(500, gin.H{"Error": "Failed to parse URL"})
@@ -138,20 +119,36 @@ func loginHandler(c *gin.Context) {
 		query.Set("client_id", users[username].Spotify_Client_ID)
 		query.Set("response_type", "code")
 		query.Set("redirect_uri", redirectURL)
-		query.Set("state", oauthState)
+		// randomly generate state and store it
+		state := generateState(username)
+		query.Set("state", state)
 		query.Set("scope", "user-library-read playlist-read-private")
 
 		// Reassign the query parameters to the URL
 		parsedURL.RawQuery = query.Encode()
-
-		c.SetCookie("session_id", sessionID, 3600, "/", "", false, true)
-		c.Redirect(303, parsedURL.String())
+	}
+	// create jwt tokens
+	accessToken, refreshToken, err := createTokens(username)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Failed to create tokens"})
 		return
 	}
-	usernames[sessionID] = username
-	// redirect to home with username and password details
-	c.SetCookie("session_id", sessionID, 3600, "/", "", false, true)
-	c.Redirect(303, "/home")
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
+}
+
+func generateState(username string) string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		log.Fatalf("failed to generate state: %v", err)
+	}
+	state := hex.EncodeToString(b)
+	oauthStates[state] = username
+	return state
 }
 
 func makeTokenRequest(username string, code string, grant_type string) error {
@@ -210,14 +207,9 @@ func makeTokenRequest(username string, code string, grant_type string) error {
 // REQUIRES NO AUTHENTICATION
 func callbackHandler(c *gin.Context) {
 	state := c.Query("state")
-	if state != oauthState {
+	username, ok := oauthStates[state]
+	if !ok {
 		c.JSON(400, gin.H{"Error": "Invalid OAuth state"})
-		return
-	}
-
-	sessionID, err := c.Cookie("session_id")
-	if err != nil {
-		c.JSON(400, gin.H{"Error": "Session ID not found"})
 		return
 	}
 
@@ -227,19 +219,27 @@ func callbackHandler(c *gin.Context) {
 		return
 	}
 
-	username := usernames[sessionID]
 	code := c.Query("code")
 
-	err = makeTokenRequest(username, code, "authorization_code")
+	err := makeTokenRequest(username, code, "authorization_code")
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Internal server error"})
 		return
 	}
+	// create jwt tokens
+	accessToken, refreshToken, err := createTokens(username)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Failed to create tokens"})
+		return
+	}
 
-	c.Redirect(303, "/home")
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
 }
 
-// Refresh token if expired
+// Refresh spotify token if expired
 func getValidToken(username string) (string, error) {
 	mu_usertokens.Lock()
 	userToken, exists := userTokens[username]
@@ -248,7 +248,7 @@ func getValidToken(username string) (string, error) {
 		// get refresh token from db
 		refresh_token := users[username].Spotify_Token_Refresh
 		if refresh_token == "-1" {
-			return "", fmt.Errorf("flease login first")
+			return "", fmt.Errorf("please login first")
 		}
 
 		err := makeTokenRequest(username, refresh_token, "refresh_token")
@@ -272,4 +272,99 @@ func getValidToken(username string) (string, error) {
 	}
 
 	return userToken.Token, nil
+}
+
+func refreshTokenHandler(c *gin.Context) {
+	refreshToken := c.GetHeader("Authorization")
+	if refreshToken == "" || len(refreshToken) <= len("Bearer ") {
+		c.JSON(401, gin.H{"Error": "Authorization header missing"})
+		return
+	}
+	refreshToken = refreshToken[len("Bearer "):]
+	username, ok := refreshTokens[refreshToken]
+	if !ok {
+		c.JSON(401, gin.H{"Error": "Invalid refresh token"})
+		return
+	}
+
+	accessToken, newRefreshToken, err := createTokens(username)
+	if err != nil {
+		c.JSON(500, gin.H{"Error": "Failed to create tokens"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": newRefreshToken,
+	})
+}
+
+func logoutHandler(c *gin.Context) {
+	token := c.GetHeader("Authorization")
+	if token == "" {
+		c.JSON(401, gin.H{"Error": "Authorization header missing"})
+		return
+	}
+	username, ok := usernames[token]
+	if !ok {
+		c.JSON(401, gin.H{"Error": "Invalid token"})
+		return
+	}
+
+	// remove tokens
+	delete(usernames, token)
+
+	var refreshTokenToDelete string
+	for rt, user := range refreshTokens {
+		if user == username {
+			refreshTokenToDelete = rt
+			break
+		}
+	}
+	if refreshTokenToDelete != "" {
+		delete(refreshTokens, refreshTokenToDelete)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Logged out successfully",
+	})
+}
+
+func createTokens(username string) (string, string, error) {
+	// Create access token (short-lived)
+	accessToken, err := createToken(username, 15*time.Minute, jwtKey)
+	if err != nil {
+		return "", "", fmt.Errorf("could not create access token: %v", err)
+	}
+
+	// Create refresh token (long-lived)
+	refreshToken, err := createToken(username, 7*24*time.Hour, refreshKey)
+	if err != nil {
+		return "", "", fmt.Errorf("could not create refresh token: %v", err)
+	}
+
+	// store tokens
+	usernames[accessToken] = username
+	for token, user := range refreshTokens {
+		if user == username {
+			// remove old refresh token
+			delete(refreshTokens, token)
+			break
+		}
+	}
+	refreshTokens[refreshToken] = username
+
+	return accessToken, refreshToken, nil
+}
+
+func createToken(username string, duration time.Duration, key []byte) (string, error) {
+	expirationTime := time.Now().Add(duration)
+	claims := &Claims{
+		Username: username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(key)
 }
