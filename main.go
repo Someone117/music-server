@@ -1,24 +1,26 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 )
-
 var musicDir string
 var fileExtension string
 var spotify_query_limit string
-var disable_auth bool
 var enable_download bool
+var max_db_to_fetch int = 20
+var cookie_path string
 
 // Init function to load .env file and setup database connection
 func init() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatal("Error loading .env file: ", err)
 	}
 	musicDir = os.Getenv("MUSIC_DIR")
 	fileExtension = os.Getenv("FILE_EXTENSION")
@@ -26,15 +28,40 @@ func init() {
 	if spotify_query_limit == "" {
 		spotify_query_limit = "50"
 	}
-	disable_auth = os.Getenv("DISABLE_AUTH") == "true"	
 
-	// Note: DO NOT set to true. Use your own music collection. Setting this to true will use spotdl to download music, read https://github.com/spotDL/spotify-downloader for a notice on the potential consequences of using this feature.
-	enable_download = os.Getenv("ENABLE_DOWNLOAD") == "true"
+	max_db_to_fetch_str := os.Getenv("MAX_DB_TO_FETCH")
+	if max_db_to_fetch_str == "" {
+		max_db_to_fetch = 20
+	} else {
+		max_db_to_fetch, err = strconv.Atoi(max_db_to_fetch_str)
+		if err != nil {
+			log.Printf("Error parsing MAX_DB_TO_FETCH: %v\n", err)
+		}
+	}
+
+	cookie_path = os.Getenv("COOKIE_PATH") // path to browser cookies for youtube login
+	
+	enable_download_str := os.Getenv("ENABLE_DOWNLOAD")
+	if enable_download_str == "I accept the risks" {
+		enable_download = true
+		fmt.Println("Downloads enabled")
+	} else {
+		enable_download = false
+	}
 	setupDB()
+
 }
 
 // Main function to start the server and handle token refresh
 func main() {
-	// setup log file
 	ApiSetUp()
+}
+func cleanup() {
+	// Close the database connection when the application exits
+	fmt.Println("\nCleaning up...")
+	// save the current refresh tokens
+	saveAllRefreshTokens()
+	if db != nil {
+		db.Close()
+	}
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -24,7 +26,7 @@ func isPlaylistOwner(username string, playlistID string) (bool, error) {
 // Returns: playlist ID for the newly created playlist
 // Creates a new playlist in the database ( TODO: and on Spotify in the future)
 func createPlaylistHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -37,8 +39,9 @@ func createPlaylistHandler(c *gin.Context) {
 	}
 
 	// Create playlist in database
-	_, err = db.Exec("INSERT INTO playlists (id, title, username, tracks, flags) VALUES (?, ?, ?, ?, ?)", playlistName, playlistName, username, "-1", 0)
+	_, err = db.Exec("INSERT INTO playlists (id, title, username, tracks, flags) VALUES (?, ?, ?, ?, ?)", playlistName+"_"+username, playlistName, username, "", 0)
 	if err != nil {
+		fmt.Printf("Error creating playlist: %v\n", err)
 		c.JSON(500, gin.H{"Error": "Database error"})
 		return
 	}
@@ -51,7 +54,7 @@ func createPlaylistHandler(c *gin.Context) {
 // Returns: response code 200 if successful
 // Adds a track to a playlist in the database (TODO: and on Spotify in the future)
 func addTrackHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -73,33 +76,34 @@ func addTrackHandler(c *gin.Context) {
 		c.JSON(400, gin.H{"Error": "No track IDs provided"})
 		return
 	}
+	listOfIds := strings.Split(trackIDs, ",")
 
-	listofIds := strings.Split(trackIDs, ",")
+	// get the playlist object from the list
 	var playlist Playlist
-	err = db.QueryRow("SELECT * FROM playlists WHERE id = ?", playlistID).Scan(&playlist)
+	err = db.QueryRow("SELECT * FROM playlists WHERE id = ?", playlistID).Scan(&playlist.ID, &playlist.Title, &playlist.Username, &playlist.Tracks, &playlist.Flags)
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Database error"})
 		return
 	}
-	for _, trackID := range listofIds {
-		if trackID == "" {
-			continue
-		}
-		// Check if track exists in the database
-		var exists bool
-		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?)", trackID).Scan(&exists)
-		if err != nil {
-			c.JSON(500, gin.H{"Error": "Database error"})
-			return
-		}
-		if !exists {
-			c.JSON(404, gin.H{"Error": "Track not found: " + trackID})
-			return
-		}
-		// get playlist obj
-		playlist.Tracks += trackID + ","
 
+	existingTracks := strings.Split(playlist.Tracks, ",")
+	for i, trackID := range listOfIds {
+		isDuplicate := slices.Contains(existingTracks, trackID)
+		if i == len(listOfIds)-1 {
+			if !isDuplicate {
+				playlist.Tracks += trackID
+			}
+		} else {
+			if !isDuplicate {
+				// if the last character of the tracks is not a comma and not empty, add a comma
+				if playlist.Tracks != "" && playlist.Tracks[len(playlist.Tracks)-1] != ',' {
+					playlist.Tracks += ","
+				}
+				playlist.Tracks += trackID + ","
+			}
+		}
 	}
+
 	// remove trailing comma
 	playlist.Tracks = playlist.Tracks[:len(playlist.Tracks)-1]
 	// update playlist obj
@@ -113,7 +117,7 @@ func addTrackHandler(c *gin.Context) {
 }
 
 func setPlaylistTracksHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -138,13 +142,13 @@ func setPlaylistTracksHandler(c *gin.Context) {
 
 	listofIds := strings.Split(trackIDs, ",")
 	var tracks string
+	// Then, make one request to check if all tracks exist
 	for _, trackID := range listofIds {
 		if trackID == "" {
 			continue
 		}
-		// Check if track exists in the database
 		var exists bool
-		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?)", trackID).Scan(&exists)
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?)", trackID).Scan(&exists)
 		if err != nil {
 			c.JSON(500, gin.H{"Error": "Database error"})
 			return
@@ -170,7 +174,7 @@ func setPlaylistTracksHandler(c *gin.Context) {
 }
 
 func setPlaylistNameHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -201,7 +205,7 @@ func setPlaylistNameHandler(c *gin.Context) {
 }
 
 func setPlaylistFlagsHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -238,7 +242,7 @@ func setPlaylistFlagsHandler(c *gin.Context) {
 // Returns: response code 200 if successful
 // Removes a track from a playlist in the database (TODO: and on Spotify in the future)
 func removeTrackHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
@@ -292,7 +296,7 @@ func removeTrackHandler(c *gin.Context) {
 // Returns: response code 200 if successful
 // Deletes a playlist from the user's account (TODO: and on Spotify in the future)
 func deletePlaylistHandler(c *gin.Context) {
-	username, err := validateSession(c)
+	username, err := validateToken(c)
 	if err != nil {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return

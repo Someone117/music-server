@@ -11,7 +11,7 @@ spotify_client_id="$3"
 spotify_client_secret="$4"
 database_file="music.db"
 
-sqlite3 "$database_file" "INSERT INTO Users (username, password, spotify_client_id, spotify_client_secret) VALUES ('$username', '$password', '$spotify_client_id', '$spotify_client_secret');"
+sqlite3 "$database_file" "INSERT INTO Users (username, password, spotify_client_id, spotify_client_secret, spotify_token_refresh) VALUES ('$username', '$password', '$spotify_client_id', '$spotify_client_secret', '-1');"
 
 if [ $? -eq 0 ]; then
   echo "User '$username' added"

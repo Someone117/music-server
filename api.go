@@ -1,8 +1,12 @@
 package main
 
 import (
+	"net/http"
 	"strings"
+	"syscall"
 
+	"github.com/fvbock/endless"
+	"github.com/gin-contrib/pprof"
 	"github.com/gin-gonic/gin"
 )
 
@@ -42,34 +46,44 @@ func ipWhiteList() gin.HandlerFunc {
 
 func ApiSetUp() {
 	router := gin.Default()
-	router.LoadHTMLGlob("templates/*.html") // or wherever your templates are
 	router.Use(ipWhiteList())
+	// Register pprof routes under /debug/pprof
+	pprof.Register(router)
 
 	router.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"message": "pong",
+		_, err := validateToken(c)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Unauthorized",
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok",
 		})
 	})
 
+	// redirect / to /home
+	router.GET("/", func(c *gin.Context) {
+		c.File("./static/home.html")
+	})
+	router.GET("/loginPage", func(c *gin.Context) {
+		c.File("./static/login.html")
+	})
 	router.GET("/login", loginHandler)
 	router.GET("/callback", callbackHandler)
 
 	// search all including spotify
 	router.GET("/search", searchHandler)
+	router.GET("/getArtistTracks", artistTracksHandler)
+	// get one or more from db
+	router.GET("/getTracks", trackHandler)
+	router.GET("/getAlbums", albumHandler)
+	router.GET("/getArtists", artistHandler)
+	router.GET("/getPlaylists", playlistHandler)
 	router.GET("/getArtistAlbums", artistAlbumsHandler)
 	router.GET("/getAlbumTracks", albumTracksHandler)
-
-	// get one from db
-	router.GET("/getTrack", trackHandler)
-	router.GET("/getAlbum", albumHandler)
-	router.GET("/getArtist", artistHandler)
-	router.GET("/getPlaylist", playlistHandler)
-	router.GET("/getArtistImage", artistImageHandler)
-	router.GET("/getAlbumArtist", albumArtistHandler)
-	router.GET("/getAlbumArtists", albumArtistsHandler)
-
-	// get all from db
-	router.GET("/getPlaylists", playlistsHandler)
 
 	// playlist management
 	router.POST("/createPlaylist", createPlaylistHandler)
@@ -82,14 +96,39 @@ func ApiSetUp() {
 
 	// player
 	router.GET("/play", playerHandler)
+	router.GET("/loadTracks", loadTracksHandler)
+
+	// currently playing
 	router.POST("/currentlyPlaying", currentlyPlayingHandler)
 	router.POST("/setHostPassword", setHostPasswordHandler)
 	router.GET("/getCurrentlyPlaying", getCurrentlyPlayingHandler)
 
-	router.GET("/home", homeHandler)
-	router.GET("/loginPage", loginPageHandler)
+	router.POST("/refreshToken", refreshTokenHandler)
+	router.POST("/logout", logoutHandler)
+
+	router.GET("/favicon.ico", func(ctx *gin.Context) {
+		ctx.File("./static/favicon.ico")
+	})
+
+	// automatically serve files in templates/static
+	router.Static("/static", "./static")
 
 	// start the server
 	// gin.SetMode(gin.ReleaseMode)
-	router.Run(":8080")
+	// user certificates for https
+	endlessCallback := func() {
+		cleanup()
+	}
+
+	server := endless.NewServer(":8080", router)
+	server.SignalHooks[endless.PRE_SIGNAL][syscall.SIGTERM] = append(
+		server.SignalHooks[endless.PRE_SIGNAL][syscall.SIGTERM],
+		endlessCallback,
+	)
+	server.SignalHooks[endless.PRE_SIGNAL][syscall.SIGINT] = append(
+		server.SignalHooks[endless.PRE_SIGNAL][syscall.SIGINT],
+		endlessCallback,
+	)
+
+	server.ListenAndServeTLS("./cert/certificate.pem", "./cert/privatekey.pem")
 }
