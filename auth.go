@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	redirectURL = "https://100.79.93.20:8080/callback"
 	AuthURL     = "https://accounts.spotify.com/authorize"
 	TokenURL    = "https://accounts.spotify.com/api/token"
 	jwtKey      = []byte("my_secret_key")
@@ -118,7 +117,7 @@ func loginHandler(c *gin.Context) {
 		query := parsedURL.Query()
 		query.Set("client_id", users[username].Spotify_Client_ID)
 		query.Set("response_type", "code")
-		query.Set("redirect_uri", redirectURL)
+		query.Set("redirect_uri", IP + "/callback")
 		// randomly generate state and store it
 		state := generateState(username)
 		query.Set("state", state)
@@ -156,7 +155,7 @@ func makeTokenRequest(username string, code string, grant_type string) error {
 	body.Set("grant_type", grant_type)
 	if grant_type == "authorization_code" {
 		body.Set("code", code)
-		body.Set("redirect_uri", redirectURL)
+		body.Set("redirect_uri", IP + "/callback")
 	} else if grant_type == "refresh_token" {
 		body.Set("refresh_token", code)
 	} else {

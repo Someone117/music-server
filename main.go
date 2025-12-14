@@ -15,12 +15,13 @@ var spotify_query_limit string
 var enable_download bool
 var max_db_to_fetch int = 20
 var cookie_path string
+var IP string
 
 // Init function to load .env file and setup database connection
 func init() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file: ", err)
+		log.Fatalln("Error loading .env file: ", err)
 	}
 	musicDir = os.Getenv("MUSIC_DIR")
 	fileExtension = os.Getenv("FILE_EXTENSION")
@@ -47,6 +48,11 @@ func init() {
 		fmt.Println("Downloads enabled")
 	} else {
 		enable_download = false
+	}
+
+	IP = os.Getenv("IP")
+	if IP == "" {
+		log.Fatalln("IP environment variable not set")
 	}
 	setupDB()
 

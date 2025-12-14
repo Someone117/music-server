@@ -6,9 +6,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
+
+var playlistLock sync.Mutex
 
 func isPlaylistOwner(username string, playlistID string) (bool, error) {
 	var owner string
@@ -39,7 +42,7 @@ func createPlaylistHandler(c *gin.Context) {
 	}
 
 	// Create playlist in database
-	_, err = db.Exec("INSERT INTO playlists (id, title, username, tracks, flags) VALUES (?, ?, ?, ?, ?)", playlistName+"_"+username, playlistName, username, "", 0)
+	_, err = db.Exec("INSERT INTO playlists (id, title, username, tracks, flags) VALUES (?, ?, ?, ?, ?)", playlistName+"_"+username, playlistName, username, JSONList{}, 0)
 	if err != nil {
 		fmt.Printf("Error creating playlist: %v\n", err)
 		c.JSON(500, gin.H{"Error": "Database error"})
@@ -59,6 +62,10 @@ func addTrackHandler(c *gin.Context) {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
 	}
+	
+	playlistLock.Lock()
+	defer playlistLock.Unlock()
+
 
 	playlistID := c.Query("playlistID")
 	isOwner, err := isPlaylistOwner(username, playlistID)
@@ -86,26 +93,19 @@ func addTrackHandler(c *gin.Context) {
 		return
 	}
 
-	existingTracks := strings.Split(playlist.Tracks, ",")
-	for i, trackID := range listOfIds {
-		isDuplicate := slices.Contains(existingTracks, trackID)
-		if i == len(listOfIds)-1 {
-			if !isDuplicate {
-				playlist.Tracks += trackID
-			}
-		} else {
-			if !isDuplicate {
-				// if the last character of the tracks is not a comma and not empty, add a comma
-				if playlist.Tracks != "" && playlist.Tracks[len(playlist.Tracks)-1] != ',' {
-					playlist.Tracks += ","
-				}
-				playlist.Tracks += trackID + ","
-			}
+	// prepare existingTracks slice, trimming trailing commas and handling empty playlists
+	// Append only unique track IDs to the existingTracks slice
+	for _, trackID := range listOfIds {
+		trackID = strings.TrimSpace(trackID)
+		if trackID == "" {
+			continue
+		}
+		if !slices.Contains(playlist.Tracks, trackID) {
+			playlist.Tracks = append(playlist.Tracks, trackID)
 		}
 	}
 
-	// remove trailing comma
-	playlist.Tracks = playlist.Tracks[:len(playlist.Tracks)-1]
+	// Join tracks back together without a trailing comma
 	// update playlist obj
 	_, err = db.Exec("UPDATE playlists SET tracks = ? WHERE id = ?", playlist.Tracks, playlistID)
 	if err != nil {
@@ -122,6 +122,9 @@ func setPlaylistTracksHandler(c *gin.Context) {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
 	}
+
+	playlistLock.Lock()
+	defer playlistLock.Unlock()
 
 	playlistID := c.Query("playlistID")
 	isOwner, err := isPlaylistOwner(username, playlistID)
@@ -141,7 +144,7 @@ func setPlaylistTracksHandler(c *gin.Context) {
 	}
 
 	listofIds := strings.Split(trackIDs, ",")
-	var tracks string
+	var tracks JSONList
 	// Then, make one request to check if all tracks exist
 	for _, trackID := range listofIds {
 		if trackID == "" {
@@ -158,11 +161,10 @@ func setPlaylistTracksHandler(c *gin.Context) {
 			return
 		}
 		// get playlist obj
-		tracks += trackID + ","
+		tracks = append(tracks, trackID)
 
 	}
 	// remove trailing comma
-	tracks = tracks[:len(tracks)-1]
 	// update playlist obj
 	_, err = db.Exec("UPDATE playlists SET tracks = ? WHERE id = ?", tracks, playlistID)
 	if err != nil {

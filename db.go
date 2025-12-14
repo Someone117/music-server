@@ -80,7 +80,7 @@ type Playlist struct {
 	ID       string `db:"id"`
 	Title    string `db:"title"`
 	Username string `db:"username"`
-	Tracks   string `db:"tracks"`
+	Tracks   JSONList `db:"tracks"`
 	Flags    string `db:"flags"`
 }
 
@@ -96,7 +96,7 @@ type Currently_Playing struct {
 
 func setupDB() {
 	// db parameters
-	dsn := "file:/home/someone/Documents/code/music-server-better/music.db?" +
+	dsn := "file:/home/someone/Documents/code/music-server/music.db?" +
 		"_journal_mode=WAL&" +
 		"_synchronous=NORMAL&" +
 		"_cache_size=-16000&" +

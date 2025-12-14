@@ -107,7 +107,7 @@ func ApiSetUp() {
 	router.POST("/logout", logoutHandler)
 
 	router.GET("/favicon.ico", func(ctx *gin.Context) {
-		ctx.File("./static/favicon.ico")
+		ctx.File("./static/music-client/favicon.ico")
 	})
 
 	// automatically serve files in static
