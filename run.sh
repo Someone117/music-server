@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -e
+set -x
 
 go_files=$(find . -name "*.go" | tr '\n' ' ')
 

@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -18,7 +17,7 @@ import (
 
 func makeRequest(method string, url string, headers map[string]string, params map[string]string, body url.Values) (*http.Response, error) {
 	// create request
-	req, err := http.NewRequest(method, url, bytes.NewBufferString(body.Encode()))
+	req, err := http.NewRequest(method, url, strings.NewReader(body.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +48,10 @@ func makeRequest(method string, url string, headers map[string]string, params ma
 
 func generatePath(id string) string {
 	return musicDir + "/" + id + "." + fileExtension
+}
+
+func getRelativePath(id string) string {
+	return id + "." + fileExtension
 }
 
 // Parameters: username, password, query, albums (optional), artists (optional), tracks (optional), playlists (optional), spotify (optional), db (optional)
@@ -225,7 +228,7 @@ func searchHandler(c *gin.Context) {
 						continue
 					}
 				}
-				new_track, new_album, artistIDs, err := trackDataHandler(itemMap, userToken)
+				new_track, new_album, artistIDs, err := trackDataHandler(itemMap)
 				if err != nil {
 					c.JSON(500, gin.H{"Error": "Error getting track data" + err.Error()})
 					return
@@ -258,7 +261,7 @@ func searchHandler(c *gin.Context) {
 				if itemMap["name"] != nil || !strings.Contains(strings.ToLower(itemMap["name"].(string)), strings.ToLower(query)) {
 					continue
 				}
-				new_album, artistIDs, err := albumDataHandler(itemMap, userToken)
+				new_album, artistIDs, err := albumDataHandler(itemMap)
 				if err != nil {
 					c.JSON(500, gin.H{"Error": "Error getting album data" + err.Error()})
 					return
@@ -320,7 +323,7 @@ func searchHandler(c *gin.Context) {
 	})
 }
 
-func trackDataHandler(track map[string]any, userToken string) (Track, Album, []string, error) {
+func trackDataHandler(track map[string]any) (Track, Album, []string, error) {
 	// given a track, get the data, and get the album as a string and the artists as a list of strings
 	var trackData Track
 	// get artists for track
@@ -344,7 +347,7 @@ func trackDataHandler(track map[string]any, userToken string) (Track, Album, []s
 		Image:        track["album"].(map[string]any)["images"].([]any)[0].(map[string]any)["url"].(string),
 		SmallImage:   track["album"].(map[string]any)["images"].([]any)[len(track["album"].(map[string]any)["images"].([]any))-1].(map[string]any)["url"].(string),
 	}
-	newAlbum, newIDs, err := albumDataHandler(album.(map[string]any), userToken)
+	newAlbum, newIDs, err := albumDataHandler(album.(map[string]any))
 	if err != nil {
 		return trackData, Album{}, nil, err
 	}
@@ -457,7 +460,7 @@ func artistDataHandler(artist map[string]any) (Artist, error) {
 	return new_artist, nil
 }
 
-func albumDataHandler(albumMap map[string]any, userToken string) (Album, []string, error) {
+func albumDataHandler(albumMap map[string]any) (Album, []string, error) {
 	// given an album, get the data, and get the artists as a list of strings
 	// get artists for album
 	artists := albumMap["artists"].([]any)
@@ -530,7 +533,9 @@ func trackHandler(c *gin.Context) {
 		}
 	}
 	if c.Query("download") == "true" {
-		queueDownloads(idsList, true)
+		for _, track := range tracks {
+			queueDownloads(track.ID, true)
+		}
 	}
 	c.JSON(200, gin.H{
 		"tracks": tracks,
@@ -662,7 +667,7 @@ func getSpotifyAlbumsForArtist(userToken string, artistID string) ([]Album, erro
 		// new albums
 		for _, album := range spotifyResponse["items"].([]any) {
 			albumMap := album.(map[string]any)
-			new_album, _, err := albumDataHandler(albumMap, userToken)
+			new_album, _, err := albumDataHandler(albumMap)
 			if err != nil {
 				fmt.Printf("Error handling album data: %v\n", err)
 				continue

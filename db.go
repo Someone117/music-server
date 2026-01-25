@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -41,7 +42,8 @@ type User struct {
 	Spotify_Client_ID     string `db:"spotify_client_id"`
 	Spotify_Client_Secret string `db:"spotify_client_secret"`
 	Spotify_Token_Refresh string `db:"spotify_token_refresh"`
-	Refresh_Token         string `db:"refresh_token"`
+	Refresh_Token         JSONList `db:"refresh_token"`
+	UserIDS 		   	  JSONList `db:"userids"`
 }
 
 type Artist struct {
@@ -124,7 +126,8 @@ func setupDB() {
 			spotify_client_id TEXT,
 			spotify_client_secret TEXT,
 			spotify_token_refresh TEXT,
-			refresh_token TEXT DEFAULT ''
+			refresh_token TEXT DEFAULT '',
+			userids TEXT DEFAULT ''
 		);
 		CREATE TABLE artists (
 			id TEXT PRIMARY KEY UNIQUE,
@@ -190,11 +193,28 @@ func setupDB() {
 		log.Fatalf("Error getting users from DB: %v", err)
 	}
 
+	userTokens = make(map[string]*UserToken)
+    authTokens = make(map[string]string)
+    refreshTokens = make(map[string]string)
+    authTokensUserName = make(map[string]string)
+
 	for _, user := range dbUsers {
 		users[user.Username] = user
+		for i := 0; i < len(user.UserIDS); i++ {
+			userTokens[user.UserIDS[i]] = &UserToken{
+				RefreshToken:        user.Refresh_Token[i],
+				RefreshExpiry: time.Now().Add(time.Hour * 24 * 2),
+				Username:       user.Username,
+				Token: "",
+				TokenExpiry: time.Now(),
+			}
+		}
+		spotifyTokens[user.Username] = &SpotifyToken{
+			SpotifyToken:        "",
+			SpotifyRefreshToken: user.Spotify_Token_Refresh,
+			SpotifyTokenExpiry:  time.Time{},
+		}
 	}
-
-	loadAllRefreshTokens()
 
 	// get number of tracks in db
 	var tracks []Track

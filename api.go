@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"syscall"
@@ -15,14 +16,53 @@ func checkIP(ip string) bool {
 	return ip != "127.0.0.1" || ipParts[0] != "100"
 }
 
-func ipWhiteList() gin.HandlerFunc {
+func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Get IP address from request
+		// this is from Spotify
+		if c.Request.URL.Path == "/callback" {
+			// Set CORS headers
+			origin := c.GetHeader("Origin")
+			if origin != "" {
+				// Only allow specific origins if needed
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+			// Handle preflight request
+			if c.Request.Method == "OPTIONS" {
+				c.AbortWithStatus(204)
+				return
+			}
+			c.Next()
+			return
+		}
+
+		// check IP whitelist
 		ip := c.ClientIP()
 		if !checkIP(ip) {
 			// Optionally block the request
-			c.AbortWithStatusJSON(403, gin.H{"error": "Forbidden IP"})
+			c.AbortWithStatus(http.StatusNotFound)
 			return
+		}
+
+		// check token
+		if c.Request.URL.Path != "/loginPage" && c.Request.URL.Path != "/login" && c.Request.URL.Path != "/favicon.ico" && !strings.HasPrefix(c.Request.URL.Path, "/static") && c.Request.URL.Path != "/" {
+			_, err := validateToken(c)
+			if err != nil {
+				fmt.Println("Auth middleware, err:", err)
+				acceptHeader := c.GetHeader("Accept")
+				isBrowserPage := strings.Contains(acceptHeader, "text/html")
+				if isBrowserPage {
+					c.Redirect(http.StatusFound, "/loginPage")
+					c.Abort()
+				} else {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+						"error": "Unauthorized",
+					})
+				}
+				return
+			}
 		}
 
 		// Set CORS headers
@@ -41,12 +81,13 @@ func ipWhiteList() gin.HandlerFunc {
 		}
 
 		c.Next()
+
 	}
 }
 
 func ApiSetUp() {
 	router := gin.Default()
-	router.Use(ipWhiteList())
+	router.Use(authMiddleware())
 	// Register pprof routes under /debug/pprof
 	pprof.Register(router)
 
@@ -64,13 +105,21 @@ func ApiSetUp() {
 		})
 	})
 
+	musicFiles := router.Group("/music/")
+	musicFiles.Use(authMiddleware())
+	router.Static("/music", musicDir)
+
 	// redirect / to /home
 	router.GET("/", func(c *gin.Context) {
-		c.File("./static/music-client/home.html")
+		c.File("./static/music-client/html/home.html")
 	})
 	router.GET("/loginPage", func(c *gin.Context) {
-		c.File("./static/music-client/login.html")
+		c.File("./static/music-client/html/login.html")
 	})
+	router.GET("/success", func(c *gin.Context) {
+		c.File("./static/music-client/html/success.html")
+	})
+
 	router.GET("/login", loginHandler)
 	router.GET("/callback", callbackHandler)
 

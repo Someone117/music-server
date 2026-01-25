@@ -6,43 +6,44 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-
 	"github.com/gin-gonic/gin"
 )
 
 var (
-	AuthURL     = "https://accounts.spotify.com/authorize"
-	TokenURL    = "https://accounts.spotify.com/api/token"
-	jwtKey      = []byte("my_secret_key")
-	refreshKey  = []byte("my_refresh_key")
+	AuthURL  = "https://accounts.spotify.com/authorize"
+	TokenURL = "https://accounts.spotify.com/api/token"
 )
 
-// UserToken holds the token and expiry for a user
 type UserToken struct {
-	Token        string
-	TokenExpiry  time.Time
-	RefreshToken string
+	Token         string
+	TokenExpiry   time.Time
+	RefreshToken  string
+	RefreshExpiry time.Time
+	Username      string
+}
+type SpotifyToken struct {
+	SpotifyToken        string
+	SpotifyTokenExpiry  time.Time
+	SpotifyRefreshToken string
 }
 
 var (
-	userTokens    = make(map[string]*UserToken)
-	mu_usertokens sync.Mutex
-	usernames     = make(map[string]string)
-	refreshTokens = make(map[string]string) // token -> username
-	oauthStates   = make(map[string]string) // state -> username
+	userTokens         = make(map[string]*UserToken)    // device/user id -> tokens etc
+	spotifyTokens      = make(map[string]*SpotifyToken) // username -> spotify tokens etc
+	mu_usertokens      sync.Mutex
+	authTokensUserName = make(map[string]string) // token -> username for our tokens
+	authTokens         = make(map[string]string) // token -> device/user id for our tokens
+	refreshTokens      = make(map[string]string) // token -> device/user id for our tokens
+	oauthStates        = make(map[string]string) // state -> username for Spotify
+	stateIDs           = make(map[string]string) // state -> device/user id for our tokens
 )
-
-type Claims struct {
-	Username string `json:"username"`
-	jwt.RegisteredClaims
-}
 
 func validateUser(username string, password string) error {
 	// check if user exists
@@ -54,150 +55,199 @@ func validateUser(username string, password string) error {
 }
 
 func validateToken(c *gin.Context) (string, error) {
-	// check if user exists
-	token := c.GetHeader("Authorization")
-	if token == "" || len(token) <= len("Bearer ") {
-		return "", fmt.Errorf("authorization header missing")
-	}
-		token = token[len("Bearer "):]
+    token := c.GetHeader("Authorization")
+    if token == "" || len(token) <= len("Bearer ") {
+        return "", fmt.Errorf("authorization header missing")
+    }
+    token = token[len("Bearer "):]
 
-	username, ok := usernames[token]
-	if !ok {
-		return "", fmt.Errorf("invalid token")
-	}
-	return username, nil
+    // Use the authTokensUserName map that already exists!
+    username, ok := authTokensUserName[token]
+    if !ok {
+        return "", fmt.Errorf("invalid token")
+    }
+    
+    return username, nil
 }
 
 func saveAllRefreshTokens() {
-	for token, username := range refreshTokens {
-		_, ok := users[username]
-		if !ok {
-			log.Printf("User %s not found while saving refresh token\n", username)
-			continue
-		}
-		// save to db
-		_, err := db.Exec("UPDATE users SET refresh_token = ? WHERE username = ?", token, username)
-		if err != nil {
-			log.Printf("failed to update refresh token in db for user %s: %v", username, err)
-		}
-	}
-}
-
-func loadAllRefreshTokens() {
-	for username, user := range users {
-		if user.Refresh_Token == "-1" || user.Refresh_Token == "" {
-			continue
-		}
-		refreshTokens[user.Refresh_Token] = username
-	}
-}
-
-// Parameters: username, password
-// Returns: redirects to /callback
-// Logs in the user and redirects to Spotify OAuth
-func loginHandler(c *gin.Context) {
-	username := c.Query("username")
-	password := c.Query("password")
-	// check if user exists
-	err := validateUser(username, password)
-	if err != nil {
-		c.JSON(401, gin.H{"Error": err.Error()})
-		return
-	}
-
-	_, err = getValidToken(username)
-	if err != nil {
-		parsedURL, err := url.Parse(AuthURL)
-		if err != nil {
-			c.JSON(500, gin.H{"Error": "Failed to parse URL"})
-			return
-		}
-
-		// Create a URL query object and add query parameters
-		query := parsedURL.Query()
-		query.Set("client_id", users[username].Spotify_Client_ID)
-		query.Set("response_type", "code")
-		query.Set("redirect_uri", IP + "/callback")
-		// randomly generate state and store it
-		state := generateState(username)
-		query.Set("state", state)
-		query.Set("scope", "user-library-read playlist-read-private")
-
-		// Reassign the query parameters to the URL
-		parsedURL.RawQuery = query.Encode()
-	}
-	// create jwt tokens
-	accessToken, refreshToken, err := createTokens(username)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": "Failed to create tokens"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-	})
-}
-
-func generateState(username string) string {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
-	if err != nil {
-		log.Fatalf("failed to generate state: %v", err)
-	}
-	state := hex.EncodeToString(b)
-	oauthStates[state] = username
-	return state
-}
-
-func makeTokenRequest(username string, code string, grant_type string) error {
-	body := url.Values{}
-	body.Set("grant_type", grant_type)
-	if grant_type == "authorization_code" {
-		body.Set("code", code)
-		body.Set("redirect_uri", IP + "/callback")
-	} else if grant_type == "refresh_token" {
-		body.Set("refresh_token", code)
-	} else {
-		return fmt.Errorf("invalid grant type")
-	}
-
-	authHeader := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", users[username].Spotify_Client_ID, users[username].Spotify_Client_Secret)))
-	headers := map[string]string{
-		"Authorization": fmt.Sprintf("Basic %s", authHeader),
-		"Content-Type":  "application/x-www-form-urlencoded",
-	}
-
-	resp, err := makeRequest(http.MethodPost, TokenURL, headers, nil, body)
-	if err != nil {
-		return fmt.Errorf("fiailed to get token: %v", err)
-	}
-
-	defer resp.Body.Close()
-	var spotifyResponse map[string]any
-	err = json.NewDecoder(resp.Body).Decode(&spotifyResponse)
-	if err != nil {
-		return fmt.Errorf("failed to decode response: %v", err)
-	}
-	// if there is no refresh_token, use the old one
-	if _, ok := spotifyResponse["refresh_token"]; !ok {
-		spotifyResponse["refresh_token"] = users[username].Spotify_Token_Refresh
-	}
+	// fix
+	userRefreshTokens := make(map[string]JSONList) // username -> refresh tokens
+	userIDs := make(map[string]JSONList)           // username -> user ids
 
 	mu_usertokens.Lock()
-	userTokens[username] = &UserToken{
-		Token:        spotifyResponse["access_token"].(string),
-		TokenExpiry:  time.Now().Add(time.Duration(spotifyResponse["expires_in"].(float64)) * time.Second),
-		RefreshToken: spotifyResponse["refresh_token"].(string),
+	for userID, token := range userTokens {
+		userRefreshTokens[token.Username] = append(userRefreshTokens[token.Username], token.RefreshToken)
+		userIDs[token.Username] = append(userIDs[token.Username], userID)
 	}
 	mu_usertokens.Unlock()
 
-	// set token in db
-	_, err = db.Exec("UPDATE users SET spotify_token_refresh = ? WHERE username = ?", spotifyResponse["refresh_token"].(string), username)
-	if err != nil {
-		log.Printf("failed to update token in db: %v", err)
+	for username, refreshTokens := range userRefreshTokens {
+		_, err := db.Exec("UPDATE users SET refresh_token = ?, userids = ? WHERE username = ?", refreshTokens, userIDs[username], username)
+		if err != nil {
+			log.Printf("failed to save refresh tokens for user %s: %v", username, err)
+		}
 	}
-	return nil
+}
+
+func loginHandler(c *gin.Context) {
+    username := c.Query("username")
+    password := c.Query("password")
+    
+    err := validateUser(username, password)
+    if err != nil {
+        c.JSON(401, gin.H{"Error": err.Error()})
+        return
+    }
+    
+    userID, err := generateSecureRandomString(16)
+    if err != nil {
+        c.JSON(500, gin.H{"Error": "Failed to generate user ID"})
+        return
+    }
+    
+    _, err = getValidToken(username)
+    if err != nil {
+        // User needs to authorize - return the OAuth URL instead of redirecting
+        parsedURL, err := url.Parse(AuthURL)
+        if err != nil {
+            c.JSON(500, gin.H{"Error": "Failed to parse URL"})
+            return
+        }
+        
+        query := parsedURL.Query()
+        query.Set("client_id", users[username].Spotify_Client_ID)
+        query.Set("response_type", "code")
+        query.Set("redirect_uri", IP+"/callback")
+        
+        state := generateState()
+		fmt.Println(username)
+        oauthStates[state] = username
+        stateIDs[state] = userID
+        query.Set("state", state)
+        query.Set("scope", "user-library-read playlist-read-private")
+        
+        parsedURL.RawQuery = query.Encode()
+        
+        // Return JSON with the OAuth URL instead of redirecting
+        c.JSON(http.StatusOK, gin.H{
+            "requires_auth": true,
+            "auth_url": parsedURL.String(),
+        })
+        return
+    }
+    
+    accessToken, refreshToken, err := createTokens(username, userID)
+    if err != nil {
+        c.JSON(500, gin.H{"Error": "Failed to create tokens"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "access_token":  accessToken,
+        "refresh_token": refreshToken,
+    })
+}
+
+func generateState() string {
+	stateRand, err := generateSecureRandomString(16)
+	if err != nil {
+		return "randomstatelollollol"
+	}
+	return stateRand
+}
+
+// make a request to spotify to get tokens
+func makeTokenRequest(username string, code string, grant_type string) error {
+    body := url.Values{}
+    body.Set("grant_type", grant_type)
+    
+    switch grant_type {
+    case "authorization_code":
+        body.Set("code", code)
+        body.Set("redirect_uri", IP+"/callback")
+    case "refresh_token":
+        body.Set("refresh_token", code)
+    default:
+        return fmt.Errorf("invalid grant type")
+    }
+    
+    // DEBUG: Log what we're sending
+    log.Printf("=== Token Request Debug ===")
+    log.Printf("Grant Type: %s", grant_type)
+    log.Printf("Username: %s", username)
+    log.Printf("Client ID: %s", users[username].Spotify_Client_ID)
+    log.Printf("Client Secret exists: %v", users[username].Spotify_Client_Secret != "")
+    log.Printf("Client Secret length: %d", len(users[username].Spotify_Client_Secret))
+    if grant_type == "refresh_token" {
+        log.Printf("Refresh token: %s", code)
+    }
+    log.Printf("Body: %s", body.Encode())
+    
+    authHeader := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", 
+        users[username].Spotify_Client_ID, 
+        users[username].Spotify_Client_Secret)))
+    
+    headers := map[string]string{
+        "Authorization": fmt.Sprintf("Basic %s", authHeader),
+        "Content-Type":  "application/x-www-form-urlencoded",
+    }
+    
+    resp, err := makeRequest(http.MethodPost, TokenURL, headers, nil, body)
+    if err != nil {
+        return fmt.Errorf("failed to get token: %v", err)
+    }
+    defer resp.Body.Close()
+    
+    // Read the full response body
+    bodyBytes, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return fmt.Errorf("failed to read response: %v", err)
+    }
+    
+    // DEBUG: Log the response
+    log.Printf("Response Status: %d", resp.StatusCode)
+    log.Printf("Response Body: %s", string(bodyBytes))
+    
+    var spotifyResponse map[string]any
+    err = json.Unmarshal(bodyBytes, &spotifyResponse)
+    if err != nil {
+        return fmt.Errorf("failed to decode response: %v", err)
+    }
+    
+    // Check for error FIRST
+    if errorMsg, ok := spotifyResponse["error"]; ok {
+        errorDesc := ""
+        if desc, ok := spotifyResponse["error_description"]; ok {
+            errorDesc = desc.(string)
+        }
+        return fmt.Errorf("error:%v %s", errorMsg, errorDesc)
+    }
+    
+    // If there is no refresh_token, use the old one
+    if _, ok := spotifyResponse["refresh_token"]; !ok {
+        spotifyResponse["refresh_token"] = users[username].Spotify_Token_Refresh
+    }
+    
+    // Set user tokens
+    mu_usertokens.Lock()
+    if spotifyTokens[username] == nil {
+        spotifyTokens[username] = &SpotifyToken{}
+    }
+    
+    spotifyTokens[username].SpotifyToken = spotifyResponse["access_token"].(string)
+    spotifyTokens[username].SpotifyTokenExpiry = time.Now().Add(time.Duration(spotifyResponse["expires_in"].(float64)) * time.Second)
+    spotifyTokens[username].SpotifyRefreshToken = spotifyResponse["refresh_token"].(string)
+    mu_usertokens.Unlock()
+    
+    // Set token in db
+    _, err = db.Exec("UPDATE users SET spotify_token_refresh = ? WHERE username = ?", 
+        spotifyResponse["refresh_token"].(string), username)
+    if err != nil {
+        log.Printf("failed to update token in db: %v", err)
+    }
+    
+    return nil
 }
 
 // Parameters: N/A
@@ -206,7 +256,14 @@ func makeTokenRequest(username string, code string, grant_type string) error {
 // REQUIRES NO AUTHENTICATION
 func callbackHandler(c *gin.Context) {
 	state := c.Query("state")
+	mu_usertokens.Lock()
 	username, ok := oauthStates[state]
+	if !ok {
+		c.JSON(400, gin.H{"Error": "Invalid OAuth state"})
+		return
+	}
+	userID, ok := stateIDs[state]
+	mu_usertokens.Unlock()
 	if !ok {
 		c.JSON(400, gin.H{"Error": "Invalid OAuth state"})
 		return
@@ -220,59 +277,69 @@ func callbackHandler(c *gin.Context) {
 
 	code := c.Query("code")
 
+	// get spotify tokens
 	err := makeTokenRequest(username, code, "authorization_code")
 	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
+		c.JSON(500, gin.H{"Error": "Internal server error while getting tokens: " + err.Error()})
 		return
 	}
-	// create jwt tokens
-	accessToken, refreshToken, err := createTokens(username)
+	// create our tokens
+	accessToken, refreshToken, err := createTokens(username, userID)
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Failed to create tokens"})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-	})
+    c.HTML(http.StatusOK, "/success", gin.H{
+        "access_token":  accessToken,
+        "refresh_token": refreshToken,
+    })
 }
 
 // Refresh spotify token if expired
 func getValidToken(username string) (string, error) {
 	mu_usertokens.Lock()
-	userToken, exists := userTokens[username]
+	spotifyToken, exists := spotifyTokens[username]
 	mu_usertokens.Unlock()
-	if !exists {
-		// get refresh token from db
-		refresh_token := users[username].Spotify_Token_Refresh
-		if refresh_token == "-1" {
+
+	// if we don't have a token for this user, try to get one using refresh token
+	if !exists || spotifyToken == nil {
+		spotify_refresh_token := users[username].Spotify_Token_Refresh
+		if spotify_refresh_token == "-1" {
 			return "", fmt.Errorf("please login first")
 		}
 
-		err := makeTokenRequest(username, refresh_token, "refresh_token")
+		err := makeTokenRequest(username, spotify_refresh_token, "refresh_token")
 		if err != nil {
+			// set token to "-1" in db to indicate we don't have a token
+			_, err2 := db.Exec("UPDATE users SET spotify_token_refresh = ? WHERE username = ?", "-1", username)
+			if err2 != nil {
+				log.Printf("failed to update token in db: %v", err2)
+			}
 			return "", fmt.Errorf("failed to get token: %v", err)
 		}
-		mu_usertokens.Lock()
-		userToken, exists = userTokens[username]
-		mu_usertokens.Unlock()
+
 		if !exists {
 			return "", fmt.Errorf("failed to get token")
 		}
-		return userToken.Token, nil
+
+		// get again
+		mu_usertokens.Lock()
+		spotifyToken = spotifyTokens[username]
+		mu_usertokens.Unlock()
 	}
 
-	if time.Now().After(userToken.TokenExpiry) {
-		err := makeTokenRequest(username, userToken.RefreshToken, "refresh_token")
+	// check expiry
+	if time.Now().After(spotifyToken.SpotifyTokenExpiry) {
+		err := makeTokenRequest(username, spotifyToken.SpotifyRefreshToken, "refresh_token")
 		if err != nil {
 			return "", fmt.Errorf("failed to refresh token: %v", err)
 		}
 	}
 
-	return userToken.Token, nil
+	return spotifyToken.SpotifyToken, nil
 }
 
+// our tokens
 func refreshTokenHandler(c *gin.Context) {
 	refreshToken := c.GetHeader("Authorization")
 	if refreshToken == "" || len(refreshToken) <= len("Bearer ") {
@@ -280,13 +347,20 @@ func refreshTokenHandler(c *gin.Context) {
 		return
 	}
 	refreshToken = refreshToken[len("Bearer "):]
-	username, ok := refreshTokens[refreshToken]
-	if !ok {
+	mu_usertokens.Lock()
+	userID, ok := refreshTokens[refreshToken]
+	userToken, ok2 := userTokens[userID]
+	defer mu_usertokens.Unlock()
+	if !ok || !ok2 || userToken.RefreshToken != refreshToken {
 		c.JSON(401, gin.H{"Error": "Invalid refresh token"})
 		return
 	}
+	if time.Now().After(userToken.RefreshExpiry) {
+		c.Redirect(302, "/login")
+		return
+	}
 
-	accessToken, newRefreshToken, err := createTokens(username)
+	accessToken, newRefreshToken, err := createTokens(userToken.Username, userID)
 	if err != nil {
 		c.JSON(500, gin.H{"Error": "Failed to create tokens"})
 		return
@@ -304,14 +378,17 @@ func logoutHandler(c *gin.Context) {
 		c.JSON(401, gin.H{"Error": "Authorization header missing"})
 		return
 	}
-	username, ok := usernames[token]
+	mu_usertokens.Lock()
+	defer mu_usertokens.Unlock()
+	username, ok := authTokens[token]
 	if !ok {
 		c.JSON(401, gin.H{"Error": "Invalid token"})
 		return
 	}
 
 	// remove tokens
-	delete(usernames, token)
+	delete(authTokens, token)
+	delete(userTokens, username)
 
 	var refreshTokenToDelete string
 	for rt, user := range refreshTokens {
@@ -329,41 +406,59 @@ func logoutHandler(c *gin.Context) {
 	})
 }
 
-func createTokens(username string) (string, string, error) {
+func createTokens(username string, userID string) (string, string, error) {
 	// Create access token (short-lived)
-	accessToken, err := createToken(username, 15*time.Minute, jwtKey)
+	accessToken, err := generateSecureRandomString(16)
 	if err != nil {
 		return "", "", fmt.Errorf("could not create access token: %v", err)
 	}
 
 	// Create refresh token (long-lived)
-	refreshToken, err := createToken(username, 7*24*time.Hour, refreshKey)
+	refreshToken, err := generateSecureRandomString(16)
 	if err != nil {
 		return "", "", fmt.Errorf("could not create refresh token: %v", err)
 	}
 
-	// store tokens
-	usernames[accessToken] = username
-	for token, user := range refreshTokens {
-		if user == username {
-			// remove old refresh token
-			delete(refreshTokens, token)
-			break
+	mu_usertokens.Lock()
+	defer mu_usertokens.Unlock()
+
+	// do we have a token for this session
+	tokens, exists := userTokens[userID]
+	if !exists {
+		// make a new one
+		userTokens[userID] = &UserToken{
+			Token:         accessToken,
+			RefreshToken:  refreshToken,
+			TokenExpiry:   time.Now().Add(time.Minute * 15),
+			RefreshExpiry: time.Now().Add(time.Hour * 24 * 2),
+			Username:      username,
 		}
+	} else {
+		delete(authTokens, tokens.Token)
+		delete(refreshTokens, tokens.RefreshToken)
+		delete(authTokensUserName, tokens.Token)
+
+		// else update existing
+		tokens.Token = accessToken
+		tokens.RefreshToken = refreshToken
+		tokens.TokenExpiry = time.Now().Add(time.Minute * 15)
+		tokens.RefreshExpiry = time.Now().Add(time.Hour * 24 * 2)
 	}
-	refreshTokens[refreshToken] = username
+
+	// add new tokens to maps
+	authTokensUserName[accessToken] = username
+	refreshTokens[refreshToken] = userID
+	authTokens[accessToken] = userID
 
 	return accessToken, refreshToken, nil
 }
 
-func createToken(username string, duration time.Duration, key []byte) (string, error) {
-	expirationTime := time.Now().Add(duration)
-	claims := &Claims{
-		Username: username,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(expirationTime),
-		},
+func generateSecureRandomString(length int) (string, error) {
+
+	b := make([]byte, length)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(key)
+	return hex.EncodeToString(b), nil
 }

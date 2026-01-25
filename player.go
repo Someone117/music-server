@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oshokin/id3v2"
@@ -60,10 +59,9 @@ func playerHandler(c *gin.Context) {
 			return
 		}
 		if track.IsDownloaded == 0 {
-			err = queueDownloads([]string{track.ID}, false)
-			if err != nil {
-				c.JSON(500, gin.H{"Error": err.Error()})
-				return
+			channel := queueDownloads(track.ID, false)
+			if channel != nil {
+				<-channel
 			}
 		}
 		// try again
@@ -84,12 +82,10 @@ func playerHandler(c *gin.Context) {
 				// Some other error occurred while checking the file
 				log.Println("Error checking file: ", err.Error())
 			}
-			// if still not downloaded, add to queue
-			if track.IsDownloaded == 0 {
-				c.JSON(500, gin.H{"Error": "Track not downloaded yet, try again later"})
-				return
+			channel := queueDownloads(track.ID, false)
+			if channel != nil {
+				<-channel
 			}
-
 		}
 	}
 
@@ -154,105 +150,105 @@ func searchAudio(title, album, artists string) (*MatchResult, error) {
 	return &matchResult, nil
 }
 
-// downloads track
-func downloadTracks(data []string) {
-
-	if len(data) == 0 {
+func applyID3Tags(trackPath string, track Track) {
+	tag, err := id3v2.Open(trackPath, id3v2.Options{Parse: true})
+	if err != nil {
+		log.Printf("Error opening track for tagging: %v\n", err)
 		return
 	}
-	track := Track{}
+	defer tag.Close()
 
-	for _, trackID := range data {
-		trackPath := generatePath(trackID)
-		if _, err := os.Stat(trackPath); err == nil {
-			continue
-		} else if !os.IsNotExist(err) {
-			// Some other error occurred while checking the file
-			log.Println("Error checking file: ", err.Error())
-			continue
-		}
-		err := db.Get(&track, "SELECT * FROM tracks WHERE id = ?", trackID)
+	tag.SetTitle(track.Title)
+	tag.SetAlbum(track.AlbumName)
+
+	tag.SetArtist(strings.Join(track.ArtistsNames, " / "))
+
+	if track.Image != "" {
+		err := downloadAndAttachCover(tag, track.Image)
 		if err != nil {
-			log.Println("Error getting track from DB: ", err.Error())
-			continue
+			log.Printf("Warning: Could not attach cover art: %v", err)
 		}
-		artist_names := strings.Join(track.ArtistsNames, " ")
-
-		outputFile := track.ID + "." + strings.TrimPrefix(fileExtension, ".")
-
-		// search for the audio url
-		matchResult, err := searchAudio(track.Title, track.AlbumName, artist_names)
-		if err != nil {
-			log.Printf("Error searching for track %s: %s\n", track.Title, err.Error())
-			continue
-		}
-		if !matchResult.Success {
-			log.Printf("No match found for track %s: %s\n", track.Title, matchResult.Error)
-			continue
-		}
-		audioURL := matchResult.URL
-
-		if matchResult.ConfidenceScore < 0.8 {
-			log.Printf("%s: %s %s by %s in %s, Confidence: %.2f\n",
-				matchResult.URL, track.Title, matchResult.Title, matchResult.Artist, matchResult.Album, matchResult.ConfidenceScore)
-		}
-		err = downloadAudio(audioURL, outputFile)
-		if err != nil {
-			log.Printf("Error downloading track %s: %s\n", track.Title, err.Error())
-		}
-		fmt.Printf("Downloaded track %s\n", track.Title)
 	}
 
-	// Check if the tracks are downloaded
-	for _, trackID := range data {
-		trackPath := generatePath(trackID)
-		if _, err := os.Stat(trackPath); err == nil {
-			// Set the track as downloaded
-			err = SetTrackDownloaded(trackID, 1)
-			if err != nil {
-				log.Println("Error setting track as downloaded: ", err.Error())
-			}
-			downloadOnceMutex.Lock()
-			delete(downloadingMap, trackID)
-			downloadOnceMutex.Unlock()
-			// Set ID3 tags using id3v2 package
-			tag, err := id3v2.Open(trackPath, id3v2.Options{Parse: true})
-			if err != nil {
-				log.Printf("Error opening track %s for tagging: %s\n", trackID, err.Error())
-			} else {
-				tag.SetTitle(track.Title)
-				tag.SetArtist(strings.Join(track.ArtistsNames, "/"))
-				tag.SetAlbum(track.AlbumName)
-				// Add album art if available
-				if track.Image != "" {
-					// it's a url, download it
-					resp, err := http.Get(track.Image)
-					if err == nil {
-						defer resp.Body.Close()
-						if resp.StatusCode == http.StatusOK {
-							imageData, err := io.ReadAll(resp.Body)
-							if err == nil {
-								pic := id3v2.PictureFrame{
-									Encoding:    id3v2.EncodingUTF8,
-									MimeType:    "image/jpeg",
-									PictureType: id3v2.PTFrontCover,
-									Description: "Cover",
-									Picture:     imageData,
-								}
-								tag.AddAttachedPicture(pic)
-							}
-						}
-					}
-				}
+	if err := tag.Save(); err != nil {
+		log.Printf("Error saving ID3 tags: %v", err)
+	}
+}
 
-				err = tag.Save()
-				if err != nil {
-					log.Printf("Error saving ID3 tags for track %s: %s\n", trackID, err.Error())
-				}
-				tag.Close()
-			}
+func downloadAndAttachCover(tag *id3v2.Tag, imageURL string) error {
+	resp, err := http.Get(imageURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	imageData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	pic := id3v2.PictureFrame{
+		Encoding:    id3v2.EncodingUTF8,
+		MimeType:    "image/jpeg",
+		PictureType: id3v2.PTFrontCover,
+		Description: "Front Cover",
+		Picture:     imageData,
+	}
+	tag.AddAttachedPicture(pic)
+	return nil
+}
+
+// downloads track
+func downloadTrack(trackID string) {
+	if len(trackID) == 0 {
+		return
+	}
+
+	var track Track
+	trackPath := generatePath(trackID)
+
+	if _, err := os.Stat(trackPath); err == nil {
+		// we have the track already
+		return
+	}
+
+	if err := db.Get(&track, "SELECT * FROM tracks WHERE id = ?", trackID); err != nil {
+		// db err when getting the track
+		log.Printf("DB Error [%s]: %v\n", trackID, err)
+		return
+	}
+
+	artistNames := strings.Join(track.ArtistsNames, " ")
+	match, err := searchAudio(track.Title, track.AlbumName, artistNames)
+	if err != nil {
+		// we can't find the audio
+		log.Printf("Search failed for %s, error: %s\n", track.Title, err.Error())
+		return
+	}
+	if !match.Success {
+		if match.Error == "score" {
+			log.Printf("Search didn't produce a high score: %s\n", track.Title)
+		} else {
+			log.Printf("Search failed for %s, \n", track.Title)
+			return
 		}
 	}
+
+	if err := downloadAudio(match.URL, getRelativePath(trackID)); err != nil {
+		// can't download
+		log.Printf("Download failed: %v\n", err)
+		return
+	}
+
+	applyID3Tags(trackPath, track)
+
+	SetTrackDownloaded(trackID, 1)
+
+	fmt.Printf("Successfully processed %s\n", track.Title)
 }
 
 // Parameters: username, password, id, timestamp (int), volume (float), paused (bool), nextTrack
@@ -339,44 +335,55 @@ func loadTracksHandler(c *gin.Context) {
 		return
 	}
 
-	err = queueDownloads(split, true)
-	if err != nil {
-		c.JSON(500, gin.H{"Error": err.Error()})
-		return
+	channels := make([]<-chan struct{}, 0)
+	for _, id := range split {
+		var track Track
+		err := db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
+		if err != nil {
+			c.JSON(500, gin.H{"Error": "Internal server error"})
+			return
+		}
+		if track.IsDownloaded == 1 {
+			continue
+		}
+		channel := queueDownloads(track.ID, true)
+		if channel != nil {
+			channels = append(channels, channel)
+		}
 	}
+	go func() {
+		for _, ch := range channels {
+			<-ch
+		}
+	}()
 	c.JSON(200, gin.H{"Message": "Tracks are being loaded"})
 }
 
-var downloadOnceMutex sync.Mutex
-var downloadingMap = make(map[string]bool)
+var (
+	downloadingMap = make(map[string]chan struct{}) // Map of channels
+	mapMutex       sync.Mutex
+)
 
-func queueDownloads(downloadIDs []string, downloadAsync bool) error {
+func queueDownloads(downloadID string, downloadAsync bool) <-chan struct{} {
 	if !enable_download {
-		return fmt.Errorf("downloads disabled by the server administrator")
-	}
-	toDownload := []string{}
-
-	downloadOnceMutex.Lock()
-	for _, id := range downloadIDs {
-		for downloadingMap[id] {
-			// wait for download to complete
-			downloadOnceMutex.Unlock()
-			// Small sleep to avoid busy waiting
-			time.Sleep(100 * time.Millisecond)
-			downloadOnceMutex.Lock()
-		}
-		downloadingMap[id] = true
-		toDownload = append(toDownload, id)
-	}
-	downloadOnceMutex.Unlock()
-	if len(toDownload) == 0 {
 		return nil
 	}
+	mapMutex.Lock()
+	defer mapMutex.Unlock()
 
-	if !downloadAsync {
-		downloadTracks(toDownload)
-	} else {
-		go downloadTracks(toDownload)
+	ch, exists := downloadingMap[downloadID]
+	if exists {
+		return ch
 	}
-	return nil;
+	ch = make(chan struct{})
+	downloadingMap[downloadID] = ch
+
+	go func() {
+		downloadTrack(downloadID)
+		mapMutex.Lock()
+		close(ch)
+		delete(downloadingMap, downloadID)
+		mapMutex.Unlock()
+	}()
+	return ch
 }
