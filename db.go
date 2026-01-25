@@ -98,7 +98,7 @@ type Currently_Playing struct {
 
 func setupDB() {
 	// db parameters
-	dsn := "file:/home/someone/Documents/code/music-server/music.db?" +
+	dsn := "file:./music.db?" +
 		"_journal_mode=WAL&" +
 		"_synchronous=NORMAL&" +
 		"_cache_size=-16000&" +
