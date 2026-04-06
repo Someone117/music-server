@@ -116,17 +116,14 @@ func ApiSetUp() {
 	router.GET("/loginPage", func(c *gin.Context) {
 		c.File("./static/music-client/html/login.html")
 	})
-	router.GET("/success", func(c *gin.Context) {
-		c.File("./static/music-client/html/success.html")
-	})
 
 	router.GET("/login", loginHandler)
-	router.GET("/callback", callbackHandler)
 
-	// search all including spotify
+
 	router.GET("/search", searchHandler)
+	// search all
 	router.GET("/getArtistTracks", artistTracksHandler)
-	// get one or more from db
+	// search all + get one or more
 	router.GET("/getTracks", trackHandler)
 	router.GET("/getAlbums", albumHandler)
 	router.GET("/getArtists", artistHandler)

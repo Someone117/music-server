@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,76 +21,145 @@ var currentlyPlayingMap = make(map[string]Currently_Playing)
 var currentlyPlayingMutex sync.Mutex
 
 type JSONList []string
+type JSONIntList []int
 
 // JSON marshaling helpers for sqlx (since sqlite stores JSON as TEXT)
 func (j JSONList) Value() (driver.Value, error) {
+	if j == nil {
+		return "[]", nil
+	}
 	return json.Marshal(j)
 }
 
+func (j JSONIntList) Value() (driver.Value, error) {
+	if j == nil {
+		return "[]", nil
+	}
+	return json.Marshal(j)
+}
+
+func unmarshalJSONOrEmpty(data []byte, target interface{}) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.EqualFold(trimmed, []byte("null")) {
+		return nil
+	}
+	return json.Unmarshal(trimmed, target)
+}
+
+func parseJSONIntList(data []byte) (JSONIntList, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.EqualFold(trimmed, []byte("null")) {
+		return JSONIntList{}, nil
+	}
+
+	var ints []int
+	if err := json.Unmarshal(trimmed, &ints); err == nil {
+		return JSONIntList(ints), nil
+	}
+
+	// Backward compatibility: older rows may contain userids as JSON strings.
+	var stringInts []string
+	if err := json.Unmarshal(trimmed, &stringInts); err == nil {
+		converted := make(JSONIntList, 0, len(stringInts))
+		for i, raw := range stringInts {
+			value, convErr := strconv.Atoi(raw)
+			if convErr != nil {
+				return JSONIntList{}, fmt.Errorf("invalid int string at index %d: %q: %w", i, raw, convErr)
+			}
+			converted = append(converted, value)
+		}
+		return converted, nil
+	}
+
+	return JSONIntList{}, fmt.Errorf("invalid JSONIntList payload: %s", string(trimmed))
+}
+
 func (j *JSONList) Scan(src interface{}) error {
+	*j = JSONList{}
 	switch data := src.(type) {
+	case nil:
+		return nil
 	case []byte:
-		return json.Unmarshal(data, j)
+		return unmarshalJSONOrEmpty(data, j)
 	case string:
-		return json.Unmarshal([]byte(data), j)
+		return unmarshalJSONOrEmpty([]byte(data), j)
 	default:
 		return fmt.Errorf("unsupported type for JSONList: %T", src)
 	}
 }
 
+func (j *JSONIntList) Scan(src interface{}) error {
+	*j = JSONIntList{}
+	var raw []byte
+	switch data := src.(type) {
+	case nil:
+		return nil
+	case []byte:
+		raw = data
+	case string:
+		raw = []byte(data)
+	default:
+		return fmt.Errorf("unsupported type for JSONIntList: %T", src)
+	}
+
+	parsed, err := parseJSONIntList(raw)
+	if err != nil {
+		return err
+	}
+	*j = parsed
+	return nil
+}
+
 type User struct {
-	Username              string `db:"username"`
-	Password              string `db:"password"`
-	Spotify_Client_ID     string `db:"spotify_client_id"`
-	Spotify_Client_Secret string `db:"spotify_client_secret"`
-	Spotify_Token_Refresh string `db:"spotify_token_refresh"`
-	Refresh_Token         JSONList `db:"refresh_token"`
-	UserIDS 		   	  JSONList `db:"userids"`
+	Username      string      `db:"username"`
+	Password      string      `db:"password"`
+	Refresh_Token JSONList    `db:"refresh_token"`
+	UserIDS       JSONIntList `db:"userids"`
 }
 
 type Artist struct {
-	ID          string   `db:"id"`
-	Name        string   `db:"name"`
-	Image       string   `db:"image"`
-	SmallImage  string   `db:"smallimage"`
-	LastUpdated int64    `db:"last_updated"`
+	ID          int    `db:"id"`
+	Name        string `db:"name"`
+	Image       string `db:"image"`
+	LastUpdated int64  `db:"last_updated"`
 }
 
 type Album struct {
-	ID           string   `db:"id"`
-	Title        string   `db:"title"`
-	Image        string   `db:"image"`
-	SmallImage   string   `db:"smallimage"`
-	NumTracks    int      `db:"numtracks"`
-	ReleaseDate  int      `db:"releasedate"`
-	ArtistsIDs   JSONList `db:"artists_ids"`
-	ArtistsNames JSONList `db:"artists_names"`
-	IsFull       int      `db:"isfull"`
+	ID           int         `db:"id"`
+	Title        string      `db:"title"`
+	Image        string      `db:"image"`
+	NumTracks    int         `db:"numtracks"`
+	ReleaseDate  int         `db:"releasedate"`
+	ArtistsIDs   JSONIntList `db:"artists_ids"`
+	ArtistsNames JSONList    `db:"artists_names"`
+	IsFull       int         `db:"isfull"`
 }
 
 type Track struct {
-	ID           string   `db:"id"`
-	Title        string   `db:"title"`
-	AlbumID      string   `db:"album_id"`
-	AlbumName    string   `db:"album_name"`
-	ArtistsIDs   JSONList `db:"artists_ids"`
-	ArtistsNames JSONList `db:"artists_names"`
-	IsDownloaded int      `db:"is_downloaded"`
-	Image        string   `db:"image"`
-	SmallImage   string   `db:"smallimage"`
+	ID            int         `db:"id"`
+	Title         string      `db:"title"`
+	AlbumID       int         `db:"album_id"`
+	AlbumName     string      `db:"album_name"`
+	ArtistsIDs    JSONIntList `db:"artists_ids"`
+	ArtistsNames  JSONList    `db:"artists_names"`
+	IsDownloaded  int         `db:"is_downloaded"`
+	Image         string      `db:"image"`
+	ReplayGain    float64     `db:"replay_gain"`
+	Peak          float64     `db:"peak"`
+	MediaMetadata JSONList    `db:"media_metadata"`
 }
 
 type Playlist struct {
-	ID       string `db:"id"`
-	Title    string `db:"title"`
-	Username string `db:"username"`
-	Tracks   JSONList `db:"tracks"`
-	Flags    string `db:"flags"`
+	ID       int         `db:"id"`
+	Title    string      `db:"title"`
+	Username string      `db:"username"`
+	Tracks   JSONIntList `db:"tracks"`
+	Flags    string      `db:"flags"`
 }
 
 type ArtistAlbum struct {
-	ArtistID string `db:"artist_id"`
-	AlbumID  string `db:"album_id"`
+	ArtistID int `db:"artist_id"`
+	AlbumID  int `db:"album_id"`
 }
 
 type Currently_Playing struct {
@@ -123,50 +194,48 @@ func setupDB() {
 		CREATE TABLE users (
 			username TEXT PRIMARY KEY UNIQUE,
 			password TEXT,
-			spotify_client_id TEXT,
-			spotify_client_secret TEXT,
-			spotify_token_refresh TEXT,
-			refresh_token TEXT DEFAULT '',
-			userids TEXT DEFAULT ''
+			refresh_token TEXT DEFAULT '[]',
+			userids TEXT DEFAULT '[]'
 		);
 		CREATE TABLE artists (
-			id TEXT PRIMARY KEY UNIQUE,
+			id INTEGER PRIMARY KEY UNIQUE,
 			name TEXT,
-			smallimage TEXT,
 			image TEXT,
 			last_updated INTEGER
 		);
 		CREATE TABLE albums (
-			id TEXT PRIMARY KEY UNIQUE,
+			id INTEGER PRIMARY KEY UNIQUE,
 			title TEXT,
 			image TEXT,
-			smallimage TEXT,
-			isfull INTEGER,
+			numtracks INTEGER,
 			releasedate INTEGER,
 			artists_ids TEXT,
-			artists_names TEXT
+			artists_names TEXT,
+			isfull INTEGER
 		);
 		CREATE TABLE tracks (
-			id TEXT PRIMARY KEY UNIQUE,
+			id INTEGER PRIMARY KEY UNIQUE,
 			title TEXT,
-			album_id TEXT,
+			album_id INTEGER,
 			album_name TEXT,
 			artists_names TEXT,
 			artists_ids TEXT,
 			is_downloaded INTEGER,
 			image TEXT,
-			smallimage TEXT
+			replay_gain REAL,
+			peak REAL,
+			media_metadata TEXT
 		);
 		CREATE TABLE playlists (
-			id TEXT PRIMARY KEY UNIQUE,
+			id INTEGER PRIMARY KEY UNIQUE,
 			title TEXT,
 			username TEXT,
 			tracks TEXT,
 			flags TEXT
 		);
 		CREATE TABLE artist_albums (
-			artist_id TEXT,
-			album_id TEXT,
+			artist_id INTEGER,
+			album_id INTEGER,
 			PRIMARY KEY(artist_id, album_id)
 		);
 		`
@@ -193,27 +262,28 @@ func setupDB() {
 		log.Fatalf("Error getting users from DB: %v", err)
 	}
 
-	userTokens = make(map[string]*UserToken)
-    authTokens = make(map[string]string)
-    refreshTokens = make(map[string]string)
-    authTokensUserName = make(map[string]string)
+	userTokens = make(map[int]*UserToken)
+	authTokens = make(map[string]int)
+	refreshTokens = make(map[string]int)
+	authTokensUserName = make(map[string]string)
 
 	for _, user := range dbUsers {
 		users[user.Username] = user
-		for i := 0; i < len(user.UserIDS); i++ {
+		tokenCount := len(user.UserIDS)
+		if len(user.Refresh_Token) < tokenCount {
+			log.Printf("Warning: user %s has mismatched userids (%d) and refresh_token (%d), ignoring extras", user.Username, len(user.UserIDS), len(user.Refresh_Token))
+			tokenCount = len(user.Refresh_Token)
+		}
+		for i := 0; i < tokenCount; i++ {
 			userTokens[user.UserIDS[i]] = &UserToken{
-				RefreshToken:        user.Refresh_Token[i],
+				RefreshToken:  user.Refresh_Token[i],
 				RefreshExpiry: time.Now().Add(time.Hour * 24 * 2),
-				Username:       user.Username,
-				Token: "",
-				TokenExpiry: time.Now(),
+				Username:      user.Username,
+				Token:         "",
+				TokenExpiry:   time.Now(),
 			}
 		}
-		spotifyTokens[user.Username] = &SpotifyToken{
-			SpotifyToken:        "",
-			SpotifyRefreshToken: user.Spotify_Token_Refresh,
-			SpotifyTokenExpiry:  time.Time{},
-		}
+
 	}
 
 	// get number of tracks in db
@@ -228,28 +298,28 @@ func setupDB() {
 // AddArtist adds an artist to the database, also returns if it was added
 func AddArtist(artist Artist) error {
 	// Artist does not exist, add the artist
-	_, err := db.Exec("INSERT OR IGNORE INTO artists (id, name, smallimage, image, last_updated) VALUES (?, ?, ?, ?, ?)", artist.ID, artist.Name, artist.SmallImage, artist.Image, 0)
+	_, err := db.Exec("INSERT OR IGNORE INTO artists (id, name, image, last_updated) VALUES (?, ?, ?, ?)", artist.ID, artist.Name, artist.Image, time.Now().Unix())
 	return err
 }
 
 // AddAlbum adds an album to the database, also returns if it was added
 func AddAlbum(album Album) error {
-	_, err := db.Exec("INSERT OR IGNORE INTO albums (id, title, image, smallimage, isfull, releasedate, artists_ids, artists_names) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", album.ID, album.Title, album.Image, album.SmallImage, album.IsFull, album.ReleaseDate, album.ArtistsIDs, album.ArtistsNames)
+	_, err := db.Exec("INSERT OR IGNORE INTO albums (id, title, image, numtracks, releasedate, artists_ids, artists_names, isfull) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", album.ID, album.Title, album.Image, album.NumTracks, album.ReleaseDate, album.ArtistsIDs, album.ArtistsNames, album.IsFull)
 	return err
 }
 
 // AddTrack adds a track to the database
 func AddTrack(track Track) error {
-	_, err := db.Exec("INSERT OR IGNORE INTO tracks (id, title, album_id, album_name, artists_names, artists_ids, is_downloaded, image, smallimage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", track.ID, track.Title, track.AlbumID, track.AlbumName, track.ArtistsNames, track.ArtistsIDs, track.IsDownloaded, track.Image, track.SmallImage)
+	_, err := db.Exec("INSERT OR IGNORE INTO tracks (id, title, album_id, album_name, artists_ids, artists_names, is_downloaded, image, replay_gain, peak, media_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", track.ID, track.Title, track.AlbumID, track.AlbumName, track.ArtistsIDs, track.ArtistsNames, track.IsDownloaded, track.Image, track.ReplayGain, track.Peak, track.MediaMetadata)
 	return err
 }
 
-func addArtistAlbum(artistID string, albumID string) error {
+func addArtistAlbum(artistID int, albumID int) error {
 	_, err := db.Exec("INSERT OR IGNORE INTO artist_albums (artist_id, album_id) VALUES (?, ?)", artistID, albumID)
 	return err
 }
 
-func SetTrackDownloaded(trackID string, isDownloaded int) error {
+func SetTrackDownloaded(trackID int, isDownloaded int) error {
 	if isDownloaded != 0 && isDownloaded != 1 {
 		return fmt.Errorf("isDownloaded must be 0 or 1")
 	}

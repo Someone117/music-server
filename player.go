@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -55,7 +56,7 @@ func playerHandler(c *gin.Context) {
 	if download {
 		err = db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
 		if err != nil {
-			c.JSON(500, gin.H{"Error": "Internal server error"})
+			c.JSON(500, gin.H{"Error": "Internal DB error"})
 			return
 		}
 		if track.IsDownloaded == 0 {
@@ -67,7 +68,7 @@ func playerHandler(c *gin.Context) {
 		// try again
 		err = db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
 		if err != nil {
-			c.JSON(500, gin.H{"Error": "Internal server error"})
+			c.JSON(500, gin.H{"Error": "Internal DB error"})
 			return
 		}
 		if track.IsDownloaded == 0 {
@@ -107,16 +108,73 @@ func playerHandler(c *gin.Context) {
 
 func downloadAudio(url string, outputPath string) error {
 	outputPath = fmt.Sprintf("%s/%s", musicDir, outputPath)
-	cmd := exec.Command(musicDir+"/yt-dlp", "-x", "--audio-format", "mp3", "-o", outputPath, url)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd := exec.Command(
+		filepath.Join(musicDir, "yt-dlp"),
+		"-x",
+		"--extractor-args",
+		"youtube:player_client=default,-android_sdkless",
+		"--format-sort", "abr",
+		"-o", outputPath,
+		url,
+	)
+	fmt.Println(cmd.String())
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
 	err := cmd.Run()
 	if err != nil {
-		cmd2 := exec.Command(musicDir+"/yt-dlp", "-x", "--cookies-from-browser", cookie_path, "--audio-format", "mp3", "-o", outputPath, url)
+		cmd2 := exec.Command(
+			filepath.Join(musicDir, "yt-dlp"),
+			"-x",
+			"--extractor-args",
+			"youtube:player_client=default,-android_sdkless",
+			"-format-sort", "abr",
+			"-o", outputPath,
+			url,
+		)
 		cmd2.Stdout = nil
 		cmd2.Stderr = nil
 		return cmd2.Run()
 	}
+	return nil
+}
+
+func ffmpegAudio(inputPath string, outputPath string) error {
+	inputPath = filepath.Join(musicDir, inputPath)
+	outputPath = filepath.Join(musicDir, outputPath)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
+	tempPath := outputPath + ".tmp"
+
+	// FFmpeg command optimized for music quality
+	cmd := exec.Command("ffmpeg",
+		"-i", inputPath,
+		"-vn", // Remove video stream
+		"-af", "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-60dB:detection=peak,areverse,silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:detection=peak,areverse,loudnorm=I=-18:TP=-1.0:LRA=14",
+		"-c:a", "libopus",
+		tempPath,
+	)
+
+	// Capture output for debugging
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("ffmpeg error: %v, output: %s", err, string(output))
+	}
+
+	// Move temp file to final destination
+	if err := os.Rename(tempPath, outputPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to rename to final path: %v", err)
+	}
+
+	// Clean up original webm file
+	os.Remove(inputPath)
+
 	return nil
 }
 
@@ -203,11 +261,7 @@ func downloadAndAttachCover(tag *id3v2.Tag, imageURL string) error {
 }
 
 // downloads track
-func downloadTrack(trackID string) {
-	if len(trackID) == 0 {
-		return
-	}
-
+func downloadTrack(trackID int) {
 	var track Track
 	trackPath := generatePath(trackID)
 
@@ -218,7 +272,7 @@ func downloadTrack(trackID string) {
 
 	if err := db.Get(&track, "SELECT * FROM tracks WHERE id = ?", trackID); err != nil {
 		// db err when getting the track
-		log.Printf("DB Error [%s]: %v\n", trackID, err)
+		log.Printf("DB Error [%d]: %v\n", trackID, err)
 		return
 	}
 
@@ -238,11 +292,13 @@ func downloadTrack(trackID string) {
 		}
 	}
 
-	if err := downloadAudio(match.URL, getRelativePath(trackID)); err != nil {
+	if err := downloadAudio(match.URL, getIntermediateRelativePath(trackID, "webm")); err != nil {
 		// can't download
 		log.Printf("Download failed: %v\n", err)
 		return
 	}
+
+	ffmpegAudio(getIntermediateRelativePath(trackID, "webm"), getRelativePath(trackID))
 
 	applyID3Tags(trackPath, track)
 
@@ -340,7 +396,7 @@ func loadTracksHandler(c *gin.Context) {
 		var track Track
 		err := db.Get(&track, "SELECT * FROM tracks WHERE id = ?", id)
 		if err != nil {
-			c.JSON(500, gin.H{"Error": "Internal server error"})
+			c.JSON(500, gin.H{"Error": "Internal DB error"})
 			return
 		}
 		if track.IsDownloaded == 1 {
@@ -360,11 +416,11 @@ func loadTracksHandler(c *gin.Context) {
 }
 
 var (
-	downloadingMap = make(map[string]chan struct{}) // Map of channels
+	downloadingMap = make(map[int]chan struct{}) // Map of channels
 	mapMutex       sync.Mutex
 )
 
-func queueDownloads(downloadID string, downloadAsync bool) <-chan struct{} {
+func queueDownloads(downloadID int, downloadAsync bool) <-chan struct{} {
 	if !enable_download {
 		return nil
 	}

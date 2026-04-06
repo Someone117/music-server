@@ -9,6 +9,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 )
+
 var musicDir string
 var fileExtension string
 var spotify_query_limit string
@@ -25,11 +26,6 @@ func init() {
 	}
 	musicDir = os.Getenv("MUSIC_DIR")
 	fileExtension = os.Getenv("FILE_EXTENSION")
-	spotify_query_limit := os.Getenv("SPOTIFY_QUERY_LIMIT")
-	if spotify_query_limit == "" {
-		spotify_query_limit = "50"
-	}
-
 	max_db_to_fetch_str := os.Getenv("MAX_DB_TO_FETCH")
 	if max_db_to_fetch_str == "" {
 		max_db_to_fetch = 20
@@ -40,8 +36,6 @@ func init() {
 		}
 	}
 
-	cookie_path = os.Getenv("COOKIE_PATH") // path to browser cookies for youtube login
-	
 	enable_download_str := os.Getenv("ENABLE_DOWNLOAD")
 	if enable_download_str == "I accept the risks" {
 		enable_download = true
