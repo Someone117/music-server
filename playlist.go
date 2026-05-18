@@ -62,10 +62,9 @@ func addTrackHandler(c *gin.Context) {
 		c.JSON(401, gin.H{"Error": err.Error()})
 		return
 	}
-	
+
 	playlistLock.Lock()
 	defer playlistLock.Unlock()
-
 
 	playlistID := c.Query("playlistID")
 	isOwner, err := isPlaylistOwner(username, playlistID)
@@ -100,8 +99,13 @@ func addTrackHandler(c *gin.Context) {
 		if trackID == "" {
 			continue
 		}
-		if !slices.Contains(playlist.Tracks, trackID) {
-			playlist.Tracks = append(playlist.Tracks, trackID)
+		trackIDInt, err := strconv.Atoi(trackID)
+		if err != nil {
+			c.JSON(400, gin.H{"Error": "Invalid track ID: " + trackID})
+			return
+		}
+		if !slices.Contains(playlist.Tracks, trackIDInt) {
+			playlist.Tracks = append(playlist.Tracks, trackIDInt)
 		}
 	}
 
@@ -129,7 +133,7 @@ func setPlaylistTracksHandler(c *gin.Context) {
 	playlistID := c.Query("playlistID")
 	isOwner, err := isPlaylistOwner(username, playlistID)
 	if err != nil {
-		c.JSON(500, gin.H{"Error": "Internal server error"})
+		c.JSON(500, gin.H{"Error": "Internal DB error"})
 		return
 	}
 	if !isOwner {

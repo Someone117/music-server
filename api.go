@@ -47,9 +47,15 @@ func authMiddleware() gin.HandlerFunc {
 		}
 
 		// check token
-		if c.Request.URL.Path != "/loginPage" && c.Request.URL.Path != "/login" && c.Request.URL.Path != "/favicon.ico" && !strings.HasPrefix(c.Request.URL.Path, "/static") && c.Request.URL.Path != "/" {
+		if c.Request.URL.Path != "/loginPage" && c.Request.URL.Path != "/refreshToken" && c.Request.URL.Path != "/login" && c.Request.URL.Path != "/favicon.ico" && !strings.HasPrefix(c.Request.URL.Path, "/static") && c.Request.URL.Path != "/" {
 			_, err := validateToken(c)
 			if err != nil {
+				if err.Error() == "stream error" {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+						"error": "Unauthorized for streaming",
+					})
+					return
+				}
 				fmt.Println("Auth middleware, err:", err)
 				acceptHeader := c.GetHeader("Accept")
 				isBrowserPage := strings.Contains(acceptHeader, "text/html")
@@ -104,11 +110,7 @@ func ApiSetUp() {
 			"status": "ok",
 		})
 	})
-
-	musicFiles := router.Group("/music/")
-	musicFiles.Use(authMiddleware())
-	router.Static("/music", musicDir)
-
+	
 	// redirect / to /home
 	router.GET("/", func(c *gin.Context) {
 		c.File("./static/music-client/html/home.html")
@@ -116,17 +118,14 @@ func ApiSetUp() {
 	router.GET("/loginPage", func(c *gin.Context) {
 		c.File("./static/music-client/html/login.html")
 	})
-	router.GET("/success", func(c *gin.Context) {
-		c.File("./static/music-client/html/success.html")
-	})
 
 	router.GET("/login", loginHandler)
-	router.GET("/callback", callbackHandler)
 
-	// search all including spotify
+
 	router.GET("/search", searchHandler)
+	// search all
 	router.GET("/getArtistTracks", artistTracksHandler)
-	// get one or more from db
+	// search all + get one or more
 	router.GET("/getTracks", trackHandler)
 	router.GET("/getAlbums", albumHandler)
 	router.GET("/getArtists", artistHandler)
@@ -143,9 +142,9 @@ func ApiSetUp() {
 	router.POST("/setPlaylistTracks", setPlaylistTracksHandler)
 	router.POST("/setPlaylistName", setPlaylistNameHandler)
 
-	// player
-	router.GET("/play", playerHandler)
-	router.GET("/loadTracks", loadTracksHandler)
+	// playback
+	router.GET("/play", handleStream())
+	router.POST("/preload", preloadHiFiTrack())
 
 	// currently playing
 	router.POST("/currentlyPlaying", currentlyPlayingHandler)
