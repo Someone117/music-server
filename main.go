@@ -4,19 +4,16 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 var musicDir string
-var fileExtension string
-var spotify_query_limit string
-var enable_download bool
-var max_db_to_fetch int = 20
-var cookie_path string
 var IP string
+var instanceName string
+var isOwnInstance bool
+var getInstancesURL string
 
 // Init function to load .env file and setup database connection
 func init() {
@@ -25,23 +22,27 @@ func init() {
 		log.Fatalln("Error loading .env file: ", err)
 	}
 	musicDir = os.Getenv("MUSIC_DIR")
-	fileExtension = os.Getenv("FILE_EXTENSION")
-	max_db_to_fetch_str := os.Getenv("MAX_DB_TO_FETCH")
-	if max_db_to_fetch_str == "" {
-		max_db_to_fetch = 20
-	} else {
-		max_db_to_fetch, err = strconv.Atoi(max_db_to_fetch_str)
-		if err != nil {
-			log.Printf("Error parsing MAX_DB_TO_FETCH: %v\n", err)
-		}
+
+	if musicDir == "" {
+		log.Fatalln("MUSIC_DIR environment variable not set")
 	}
 
-	enable_download_str := os.Getenv("ENABLE_DOWNLOAD")
-	if enable_download_str == "I accept the risks" {
-		enable_download = true
-		fmt.Println("Downloads enabled")
+	ownInstance := os.Getenv("OWN_INSTANCE")
+	otherInstances := os.Getenv("OTHER_INSTANCES")
+	if ownInstance == "" && otherInstances == "" {
+		log.Fatalln("OWN_INSTANCE environment variable not set")
 	} else {
-		enable_download = false
+		isOwnInstance = ownInstance != "" // if it is set, using own instance
+		if isOwnInstance {
+			instanceName = ownInstance
+			getInstancesURL = ""
+		} else {
+			instanceName = otherInstances
+			getInstancesURL = os.Getenv("GET_INSTANCES_URL")
+			if getInstancesURL == "" {
+				log.Fatalln("GET_INSTANCES_URL environment variable not set")
+			}
+		}
 	}
 
 	IP = os.Getenv("IP")

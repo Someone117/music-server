@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,17 +53,26 @@ func validateUser(username string, password string) error {
 
 func validateToken(c *gin.Context) (string, error) {
 	accessToken := c.GetHeader("Authorization")
-	// check if token is valid
-	if accessToken == "" || len(accessToken) <= len("Bearer ") {
-		return "", fmt.Errorf("Authorization header missing")
+	isStream := strings.HasPrefix(c.Request.URL.Path, "/play")
+	if isStream && accessToken == "" {
+		// Fallback for media players that can't send headers
+		accessToken = c.Query("token")
+	} else {
+		// check if token is valid
+		if accessToken == "" || len(accessToken) <= len("Bearer ") {
+			return "", fmt.Errorf("Token missing")
+		}
+		accessToken = accessToken[len("Bearer "):]
 	}
-	accessToken = accessToken[len("Bearer "):]
-	
 	mu_usertokens.Lock()
 	defer mu_usertokens.Unlock()
 	// Use the authTokensUserName map that already exists!
 	username, ok := authTokensUserName[accessToken]
 	if !ok {
+		if isStream {
+			// For streaming, we can allow a special token that matches the stream key {
+			return "", fmt.Errorf("stream error")
+		}
 		return "", fmt.Errorf("invalid access token")
 	}
 
@@ -105,7 +115,6 @@ func loginHandler(c *gin.Context) {
 	username := c.Query("username")
 	password := c.Query("password")
 	userID := c.Query("user_id")
-	fmt.Printf("Login attempted: %s, %s, %s\n", username, password, userID)
 
 	err := validateUser(username, password)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -42,15 +43,24 @@ func makeRequest(method string, url string, headers map[string]string, params ma
 		return nil, err
 	}
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
 	return resp, nil
 }
 
 func generatePath(id int) string {
-	return musicDir + "/" + strconv.Itoa(id) + "." + fileExtension
+	return musicDir + "/" + strconv.Itoa(id)
 }
 
-func getRelativePath(id int) string {
-	return strconv.Itoa(id) + "." + fileExtension
+func extFromMime(mime string) string {
+	return "." + strings.Split(mime, "/")[1]
+}
+
+func mimeFromPath(path string) string {
+	ext := filepath.Ext(path)
+	return "audio/" + ext[1:]
 }
 
 func getIntermediateRelativePath(id int, intermediateExtension string) string {
@@ -105,11 +115,6 @@ func trackHandler(c *gin.Context) {
 				return
 			}
 			tracks = append(tracks, track)
-		}
-	}
-	if c.Query("download") == "true" {
-		for _, track := range tracks {
-			queueDownloads(track.ID, true)
 		}
 	}
 	c.JSON(200, gin.H{
@@ -306,11 +311,18 @@ func artistAlbumsHandler(c *gin.Context) {
 			return
 		}
 		if len(albumIDs) == 0 {
+			url := getURL(false)
+			albums, err = getArtistAlbums(url, artist.ID)
+			if err != nil {
+				c.JSON(500, gin.H{"Error": err.Error()})
+				return
+			}
 			c.JSON(200, gin.H{
 				"albums": albums,
 			})
 			return
 		}
+
 		for _, id := range albumIDs {
 			var album Album
 			err = db.Get(&album, "SELECT * FROM albums WHERE id = ?", id)
@@ -398,34 +410,39 @@ var streamUrls []string
 var apiUrls []string
 
 func getURL(isStreaming bool) string {
+	// if we are using own instance, just return instanceName
+	if isOwnInstance {
+		return instanceName
+	}
 	if len(streamUrls) == 0 || len(apiUrls) == 0 {
-		resp, err := makeRequest("GET", "https://tidal-uptime.jiffy-puffs-1j.workers.dev/", nil, nil, nil)
+		resp, err := makeRequest("GET", getInstancesURL, nil, nil, nil)
 		// get for each [streaming] get [url]
+
 		if err != nil {
-			var result struct {
-				Streaming []struct {
-					URL string `json:"url"`
-				} `json:"streaming"`
-				API []struct {
-					URL string `json:"url"`
-				} `json:"api"`
-			}
-			err := json.NewDecoder(resp.Body).Decode(&result)
-			if err != nil {
-				fmt.Printf("Error decoding response: %v\n", err)
-				return "https://us-west.monochrome.tf"
-			}
-			for _, stream := range result.Streaming {
-				streamUrls = append(streamUrls, stream.URL)
-			}
-			for _, api := range result.API {
-				apiUrls = append(apiUrls, api.URL)
-			}
-		} else {
-			fmt.Println("Error fetching URLs, using default")
-			return "https://us-west.monochrome.tf"
+			fmt.Println("Error fetching URLs, using default: ", err.Error())
+			return instanceName
+		}
+		var result struct {
+			Streaming []struct {
+				URL string `json:"url"`
+			} `json:"streaming"`
+			API []struct {
+				URL string `json:"url"`
+			} `json:"api"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		if err != nil {
+			fmt.Printf("Error decoding response: %v\n", err)
+			return instanceName
+		}
+		for _, stream := range result.Streaming {
+			streamUrls = append(streamUrls, stream.URL)
+		}
+		for _, api := range result.API {
+			apiUrls = append(apiUrls, api.URL)
 		}
 	}
+
 	// get randIndex for streamUrls and apiUrls
 	if isStreaming {
 		randIndex := time.Now().UnixNano() % int64(len(streamUrls))

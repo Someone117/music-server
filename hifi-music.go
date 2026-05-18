@@ -1,14 +1,20 @@
 package main
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // the HIFI music api implementation
@@ -39,7 +45,13 @@ func parseReleaseDate(dateStr string) int {
 	return 0
 }
 
-// --- Raw API response (kept private, used only for parsing) ---
+func responsePreview(body []byte) string {
+	preview := strings.TrimSpace(string(body))
+	if len(preview) > 300 {
+		preview = preview[:300] + "..."
+	}
+	return preview
+}
 
 type SearchResult struct {
 	ResponseType string     `json:"responseType"`
@@ -189,15 +201,55 @@ func search(baseURL string, query string, itemType string, offset int, limit int
 		"offset": fmt.Sprintf("%d", offset),
 		"limit":  fmt.Sprintf("%d", limit),
 	}
-
-	raw, err := makeRequest("GET", baseURL+"/search/", nil, queryParams, nil)
-	if err != nil {
-		return SearchResult{}, fmt.Errorf("search request failed: %w", err)
+	attemptURLs := []string{baseURL}
+	seen := map[string]bool{baseURL: true}
+	for i := 0; i < len(apiUrls); i++ {
+		u := getURL(false)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		attemptURLs = append(attemptURLs, u)
 	}
 
 	var resp searchResponse
-	if err := json.NewDecoder(raw.Body).Decode(&resp); err != nil {
-		return SearchResult{}, fmt.Errorf("failed to parse search response: %w", err)
+	var lastErr error
+	for _, attemptURL := range attemptURLs {
+		raw, err := makeRequest("GET", attemptURL+"/search/", nil, queryParams, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("search request failed on %s: %w", attemptURL, err)
+			continue
+		}
+
+		body, err := io.ReadAll(raw.Body)
+		raw.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read search response from %s: %w", attemptURL, err)
+			continue
+		}
+
+		if raw.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("search upstream returned status %d from %s: %s", raw.StatusCode, attemptURL, responsePreview(body))
+			continue
+		}
+
+		trimmed := strings.TrimSpace(string(body))
+		if strings.HasPrefix(trimmed, "<") {
+			lastErr = fmt.Errorf("search upstream returned HTML instead of JSON from %s: %s", attemptURL, responsePreview(body))
+			continue
+		}
+
+		if err := json.Unmarshal(body, &resp); err != nil {
+			lastErr = fmt.Errorf("failed to parse search response from %s: %w", attemptURL, err)
+			continue
+		}
+
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return SearchResult{}, lastErr
 	}
 
 	d := resp.Data
@@ -245,12 +297,37 @@ func search(baseURL string, query string, itemType string, offset int, limit int
 }
 
 func getAlbum(baseURL string, id int) (Album, []Track, error) {
-	raw, err := makeRequest("GET", baseURL+"/album/", nil, map[string]string{
+	queryParams := map[string]string{
 		"id": fmt.Sprintf("%d", id),
-	}, nil)
-	if err != nil {
-		return Album{}, nil, fmt.Errorf("get album failed: %w", err)
 	}
+
+	attemptURLs := []string{baseURL}
+	seen := map[string]bool{baseURL: true}
+	for i := 0; i < len(apiUrls); i++ {
+		u := getURL(false)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		attemptURLs = append(attemptURLs, u)
+	}
+
+	var raw *http.Response
+	var err error
+	var lastErr error
+	for _, attemptURL := range attemptURLs {
+		raw, err = makeRequest("GET", attemptURL+"/album/", nil, queryParams, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("get album failed on %s: %w", attemptURL, err)
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return Album{}, nil, lastErr
+	}
+	defer raw.Body.Close()
 
 	var resp struct {
 		Data struct {
@@ -328,8 +405,25 @@ func getArtistAlbums(baseURL string, id int) ([]Album, error) {
 		"skip_tracks": "true",
 	}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("get artist albums failed: %w", err)
+		fmt.Println("trying backup url")
+		// remove that URL:
+		for i, url := range apiUrls {
+			if url == baseURL {
+				apiUrls = append(apiUrls[:i], apiUrls[i+1:]...)
+				break
+			}
+		}
+		// try 1 more time with new URL:
+		baseURL = getURL(false)
+		raw, err = makeRequest("GET", baseURL+"/artist/", nil, map[string]string{
+			"f":           fmt.Sprintf("%d", id),
+			"skip_tracks": "true",
+		}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("get artist albums failed: %w", err)
+		}
 	}
+	defer raw.Body.Close()
 
 	var resp struct {
 		Albums struct {
@@ -340,10 +434,14 @@ func getArtistAlbums(baseURL string, id int) ([]Album, error) {
 	if err := json.NewDecoder(raw.Body).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("failed to parse artist albums response: %w", err)
 	}
+	fmt.Println("Artist Albums Response:", resp.Albums.Items)
 
 	var albums []Album
 	for _, r := range resp.Albums.Items {
 		al := albumFromRaw(r)
+		if err := addArtistAlbum(id, al.ID); err != nil {
+			return nil, fmt.Errorf("failed to save artist album relation: %w", err)
+		}
 		albums = append(albums, al)
 	}
 	return albums, nil
@@ -354,17 +452,10 @@ func getAlbumTracks(baseURL string, id int) ([]Track, error) {
 	return tracks, err
 }
 
-func decodeManifest(manifest string) ([]byte, error) {
-	decoded, err := base64.StdEncoding.DecodeString(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode manifest: %w", err)
-	}
-	return decoded, nil
-}
-
 type dashManifest struct {
 	Periods []struct {
 		AdaptationSets []struct {
+			MimeType        string `xml:"mimeType,attr"` // Now exported
 			Representations []struct {
 				SegmentTemplate struct {
 					Initialization  string `xml:"initialization,attr"`
@@ -382,23 +473,23 @@ type dashManifest struct {
 	} `xml:"Period"`
 }
 
-func buildDashSegmentURLs(decodedManifest []byte) ([]string, error) {
+func buildDashSegmentURLs(decodedManifest []byte) ([]string, string, error) {
 	var mpd dashManifest
 	if err := xml.Unmarshal(decodedManifest, &mpd); err != nil {
-		return nil, fmt.Errorf("failed to parse MPD manifest: %w", err)
+		return nil, "", fmt.Errorf("failed to parse MPD manifest: %w", err)
 	}
 
 	if len(mpd.Periods) == 0 || len(mpd.Periods[0].AdaptationSets) == 0 || len(mpd.Periods[0].AdaptationSets[0].Representations) == 0 {
-		return nil, fmt.Errorf("invalid MPD: missing period/adaptation set/representation")
+		return nil, "", fmt.Errorf("invalid MPD: missing period/adaptation set/representation")
 	}
 
 	tmpl := mpd.Periods[0].AdaptationSets[0].Representations[0].SegmentTemplate
 	if tmpl.Initialization == "" || tmpl.Media == "" {
-		return nil, fmt.Errorf("invalid MPD: missing SegmentTemplate initialization/media")
+		return nil, "", fmt.Errorf("invalid MPD: missing SegmentTemplate initialization/media")
 	}
 
 	if !strings.Contains(tmpl.Media, "$Number$") {
-		return nil, fmt.Errorf("unsupported MPD media template: expected $Number$")
+		return nil, "", fmt.Errorf("unsupported MPD media template: expected $Number$")
 	}
 
 	startNumber := tmpl.StartNumber
@@ -410,13 +501,13 @@ func buildDashSegmentURLs(decodedManifest []byte) ([]string, error) {
 	for _, s := range tmpl.SegmentTimeline.Segments {
 		repeat := s.Repeat
 		if repeat < 0 {
-			return nil, fmt.Errorf("unsupported MPD SegmentTimeline repeat value: %d", repeat)
+			return nil, "", fmt.Errorf("unsupported MPD SegmentTimeline repeat value: %d", repeat)
 		}
 		segmentCount += repeat + 1
 	}
 
 	if segmentCount == 0 {
-		return nil, fmt.Errorf("invalid MPD: no media segments in SegmentTimeline")
+		return nil, "", fmt.Errorf("invalid MPD: no media segments in SegmentTimeline")
 	}
 
 	urls := make([]string, 0, segmentCount+1)
@@ -425,100 +516,352 @@ func buildDashSegmentURLs(decodedManifest []byte) ([]string, error) {
 		n := startNumber + i
 		urls = append(urls, strings.ReplaceAll(tmpl.Media, "$Number$", fmt.Sprintf("%d", n)))
 	}
-
-	return urls, nil
+	return urls, mpd.Periods[0].AdaptationSets[0].MimeType, nil
 }
 
-func downloadAndJoinURLs(urls []string) ([]byte, error) {
-	var out bytes.Buffer
+type btsManifest struct {
+	ManifestMimeType string   `json:"mimeType"`
+	Codecs           string   `json:"codecs"` // idk if this is a list
+	EncryptionType   string   `json:"encryptionType"`
+	URLs             []string `json:"urls"`
+}
+
+func buildBTSURLs(decodedManifest []byte) ([]string, string, error) {
+	var bts btsManifest
+	if err := json.Unmarshal(decodedManifest, &bts); err != nil {
+		return nil, "", fmt.Errorf("failed to parse BTS manifest: %w", err)
+	}
+	return bts.URLs, bts.ManifestMimeType, nil
+}
+
+// check between manifestMimeType application/dash+xml and application/vnd.tidal.bts to determine if we need to do segmented downloading or not, and then get the urls for the segments if needed
+func decodeManifest(manifest string) ([]string, string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(manifest)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to decode manifest: %w", err)
+	}
+	// check if it's a dash manifest or not by looking for the <MPD> tag
+	if !strings.Contains(string(decoded), "<MPD") {
+		urls, manifestMimeType, err := buildBTSURLs(decoded)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to build BTS URLs: %w", err)
+		}
+		return urls, manifestMimeType, nil
+	} else {
+		urls, manifestMimeType, err := buildDashSegmentURLs(decoded)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to build DASH segment URLs: %w", err)
+		}
+		return urls, manifestMimeType, nil
+	}
+}
+
+func hiFiTrackURLs(baseURL string, id int) ([]string, string, error) {
+	queryParams := map[string]string{
+		"id": fmt.Sprintf("%d", id),
+	}
+
+	attemptURLs := []string{baseURL}
+	seen := map[string]bool{baseURL: true}
+	for i := 0; i < len(apiUrls); i++ {
+		u := getURL(false)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		attemptURLs = append(attemptURLs, u)
+	}
+
+	var lastErr error
+	for _, attemptURL := range attemptURLs {
+		data, err := makeRequest("GET", attemptURL+"/track/", nil, queryParams, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("get track failed on %s: %w", attemptURL, err)
+			continue
+		}
+
+		var resp struct {
+			Version string `json:"version"`
+			Data    struct {
+				TrackID            int     `json:"trackId"`
+				AssetPresentation  string  `json:"assetPresentation"`
+				AudioMode          string  `json:"audioMode"`
+				AudioQuality       string  `json:"audioQuality"`
+				ManifestMimeType   string  `json:"manifestMimeType"`
+				ManifestHash       string  `json:"manifestHash"`
+				Manifest           string  `json:"manifest"`
+				AlbumReplayGain    float64 `json:"albumReplayGain"`
+				AlbumPeakAmplitude float64 `json:"albumPeakAmplitude"`
+				TrackReplayGain    float64 `json:"trackReplayGain"`
+				TrackPeakAmplitude float64 `json:"trackPeakAmplitude"`
+				BitDepth           int     `json:"bitDepth"`
+				SampleRate         int     `json:"sampleRate"`
+			} `json:"data"`
+		}
+
+		if err := json.NewDecoder(data.Body).Decode(&resp); err != nil {
+			data.Body.Close()
+			lastErr = fmt.Errorf("failed to parse track response from %s: %w", attemptURL, err)
+			continue
+		}
+		data.Body.Close()
+
+		urls, manifestMimeType, err := decodeManifest(resp.Data.Manifest)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to decode manifest from %s: %w", attemptURL, err)
+			continue
+		}
+		return urls, manifestMimeType, nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("get track failed: no upstream URL available")
+	}
+	return nil, "", lastErr
+}
+
+var activeJobs sync.Map // id -> *TrackState
+var downloadSlots = make(chan struct{}, 3)
+
+type DownloadState struct {
+	mutex     sync.Mutex
+	done      bool
+	readers   int
+	finalPath string
+	tmpPath   string
+}
+
+func handleStream() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		handleDownload(c, true)
+	}
+}
+func preloadHiFiTrack() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		handleDownload(c, false)
+	}
+}
+
+func handleDownload(c *gin.Context, stream bool) {
+	trackID, _ := strconv.Atoi(c.Query("id"))
+	basePath := generatePath(trackID)
+
+	// if already downloaded, serve the file
+	if matches, _ := filepath.Glob(basePath + ".*"); len(matches) > 0 {
+		for _, m := range matches {
+			if !strings.HasSuffix(m, ".tmp") {
+				c.File(m)
+				return
+			}
+		}
+	}
+
+	actual, loaded := activeJobs.LoadOrStore(trackID, &DownloadState{})
+	// wait for the existing job to finish if there is one
+	if loaded {
+		// stream while we wait
+		job := actual.(*DownloadState)
+		if stream {
+			job.mutex.Lock()
+			job.readers++
+			job.mutex.Unlock()
+			defer func() {
+				job.mutex.Lock()
+				job.readers--
+				if job.readers == 0 && job.done {
+					os.Remove(job.tmpPath)
+				}
+				if job.done {
+					activeJobs.Delete(trackID)
+				}
+				job.mutex.Unlock()
+			}()
+			for {
+				job.mutex.Lock()
+				tmp := job.tmpPath
+				done := job.done
+				job.mutex.Unlock()
+
+				if tmp != "" {
+					streamFile(c, job)
+					return
+				}
+				if done {
+					c.File(job.finalPath)
+				}
+
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+		return
+	}
+	job := actual.(*DownloadState)
+	go func() {
+		_, err := downloadTrack(trackID, job)
+		if err != nil {
+			fmt.Println("download error:", err)
+		}
+	}()
+	if stream {
+		job.mutex.Lock()
+		job.readers++
+		job.mutex.Unlock()
+		defer func() {
+			job.mutex.Lock()
+			job.readers--
+			if job.readers == 0 && job.done {
+				os.Remove(job.tmpPath)
+			}
+			if job.done {
+				activeJobs.Delete(trackID)
+			}
+			job.mutex.Unlock()
+		}()
+		for {
+			job.mutex.Lock()
+			tmp := job.tmpPath
+			done := job.done
+			job.mutex.Unlock()
+
+			if tmp != "" {
+				streamFile(c, job)
+				return
+			}
+			if done {
+				c.File(job.finalPath)
+			}
+
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func downloadTrack(trackID int, job *DownloadState) (string, error) {
+	downloadSlots <- struct{}{}
+	defer func() { <-downloadSlots }()
+
+	urls, segmentMimeType, err := hiFiTrackURLs(getURL(false), trackID)
+	if err != nil {
+		return "", err
+	}
+
+	ext := extFromMime(segmentMimeType)
+	finalPath := generatePath(trackID) + ext
+	tmpPath := finalPath + ".tmp"
+
+	os.MkdirAll(filepath.Dir(tmpPath), 0755)
+
+	// stream while writing
+	localFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return "", err
+	}
+
+	// set tmpPath immediately
+	job.mutex.Lock()
+	job.tmpPath = tmpPath
+	job.mutex.Unlock()
+
+	client := &http.Client{Timeout: 20 * time.Second}
 	for _, u := range urls {
-		resp, err := makeRequest("GET", u, nil, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to request segment: %w", err)
+		segmentErr := error(nil)
+		for attempt := 1; attempt <= 3; attempt++ {
+			resp, err := client.Get(u)
+			if err != nil {
+				segmentErr = err
+				time.Sleep(time.Duration(attempt*150) * time.Millisecond)
+				continue
+			}
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				segmentErr = fmt.Errorf("segment returned status %d", resp.StatusCode)
+				time.Sleep(time.Duration(attempt*150) * time.Millisecond)
+				continue
+			}
+
+			_, err = io.Copy(localFile, resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				segmentErr = err
+				time.Sleep(time.Duration(attempt*150) * time.Millisecond)
+				continue
+			}
+
+			segmentErr = nil
+			break
 		}
 
-		segmentBytes, readErr := io.ReadAll(resp.Body)
-		closeErr := resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("failed to read segment: %w", readErr)
-		}
-		if closeErr != nil {
-			return nil, fmt.Errorf("failed to close segment response body: %w", closeErr)
+		if segmentErr != nil {
+			return "", fmt.Errorf("failed downloading track %d segment: %w", trackID, segmentErr)
 		}
 
-		if _, err := out.Write(segmentBytes); err != nil {
-			return nil, fmt.Errorf("failed to append segment: %w", err)
-		}
+		// flush to disk to ensure streamer sees data
+		localFile.Sync()
 	}
 
-	return out.Bytes(), nil
-}
+	localFile.Close()
 
-func getTrackStream(baseURL string, id int, quality string) (string, string, error) {
-	raw, err := makeRequest("GET", baseURL+"/track/", nil, map[string]string{
-		"id":      fmt.Sprintf("%d", id),
-		"quality": quality,
-	}, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("getTrackStream failed: %w", err)
-	}
-
-	defer raw.Body.Close()
-	body, err := io.ReadAll(raw.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read body: %w", err)
-	}
-
-	var resp struct {
-		Data struct {
-			ManifestMimeType string `json:"manifestMimeType"`
-			Manifest         string `json:"manifest"`
-			AudioQuality     string `json:"audioQuality"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", "", fmt.Errorf("failed to parse stream response: %w", err)
-	}
-
-	return resp.Data.Manifest, resp.Data.ManifestMimeType, nil
-}
-
-func getStreamURL(baseURL string, id int, quality string) (string, error) {
-	manifest, mimeType, err := getTrackStream(baseURL, id, quality)
-	if err != nil {
+	// move (atomic)
+	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return "", err
 	}
 
-	decoded, err := decodeManifest(manifest)
+	job.mutex.Lock()
+	job.done = true
+	job.finalPath = finalPath
+	job.mutex.Unlock()
+
+	return finalPath, nil
+}
+
+func streamFile(c *gin.Context, job *DownloadState) {
+	job.mutex.Lock()
+	path := job.tmpPath
+	job.mutex.Unlock()
+
+	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		c.Status(404)
+		return
 	}
+	defer f.Close()
 
-	switch mimeType {
-	case "application/vnd.tidal.bts":
-		var bts struct {
-			URLs []string `json:"urls"`
-		}
-		if err := json.Unmarshal(decoded, &bts); err != nil {
-			return "", fmt.Errorf("failed to parse BTS manifest: %w", err)
-		}
-		if len(bts.URLs) == 0 {
-			return "", fmt.Errorf("no URLs in manifest")
-		}
-		return bts.URLs[0], nil
+	c.Header("Content-Type", mimeFromPath(path))
 
-	case "application/dash+xml":
-		urls, err := buildDashSegmentURLs(decoded)
+	var offset int64 = 0
+	buf := make([]byte, 64*1024)
+
+	for {
+		n, err := f.ReadAt(buf, offset)
+		if n > 0 {
+			c.Writer.Write(buf[:n])
+			c.Writer.Flush()
+			offset += int64(n)
+		}
+
+		if err == io.EOF {
+			job.mutex.Lock()
+			finished := job.done
+			job.mutex.Unlock()
+
+			if finished {
+				// check for last remaining bytes
+				n, _ = f.ReadAt(buf, offset)
+				if n > 0 {
+					c.Writer.Write(buf[:n])
+				}
+				return
+			}
+			// wait for more segments
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
 		if err != nil {
-			return "", err
+			break
 		}
-		if len(urls) == 0 {
-			return "", fmt.Errorf("no URLs in DASH manifest")
-		}
-		return urls[0], nil
-
-	default:
-		return "", fmt.Errorf("unknown manifest type: %s", mimeType)
 	}
 }
 

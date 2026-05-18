@@ -142,7 +142,6 @@ type Track struct {
 	AlbumName     string      `db:"album_name"`
 	ArtistsIDs    JSONIntList `db:"artists_ids"`
 	ArtistsNames  JSONList    `db:"artists_names"`
-	IsDownloaded  int         `db:"is_downloaded"`
 	Image         string      `db:"image"`
 	ReplayGain    float64     `db:"replay_gain"`
 	Peak          float64     `db:"peak"`
@@ -220,7 +219,6 @@ func setupDB() {
 			album_name TEXT,
 			artists_names TEXT,
 			artists_ids TEXT,
-			is_downloaded INTEGER,
 			image TEXT,
 			replay_gain REAL,
 			peak REAL,
@@ -310,20 +308,12 @@ func AddAlbum(album Album) error {
 
 // AddTrack adds a track to the database
 func AddTrack(track Track) error {
-	_, err := db.Exec("INSERT OR IGNORE INTO tracks (id, title, album_id, album_name, artists_ids, artists_names, is_downloaded, image, replay_gain, peak, media_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", track.ID, track.Title, track.AlbumID, track.AlbumName, track.ArtistsIDs, track.ArtistsNames, track.IsDownloaded, track.Image, track.ReplayGain, track.Peak, track.MediaMetadata)
+	_, err := db.Exec("INSERT OR IGNORE INTO tracks (id, title, album_id, album_name, artists_ids, artists_names, image, replay_gain, peak, media_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", track.ID, track.Title, track.AlbumID, track.AlbumName, track.ArtistsIDs, track.ArtistsNames, track.Image, track.ReplayGain, track.Peak, track.MediaMetadata)
 	return err
 }
 
 func addArtistAlbum(artistID int, albumID int) error {
 	_, err := db.Exec("INSERT OR IGNORE INTO artist_albums (artist_id, album_id) VALUES (?, ?)", artistID, albumID)
-	return err
-}
-
-func SetTrackDownloaded(trackID int, isDownloaded int) error {
-	if isDownloaded != 0 && isDownloaded != 1 {
-		return fmt.Errorf("isDownloaded must be 0 or 1")
-	}
-	_, err := db.Exec("UPDATE tracks SET is_downloaded = ? WHERE id = ?", isDownloaded, trackID)
 	return err
 }
 
